@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "miniverse"
 version = "0.2.0"
@@ -29,10 +33,18 @@ dependencies = [
     "openai>=1.0.0",
     "asyncpg>=0.29.0",
     "tenacity>=8.2.3",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
 ]
 
+[project.scripts]
+miniverse = "miniverse.cli:main"
+
 [tool.setuptools]
-packages = ["miniverse"]
+packages = ["miniverse", "miniverse.cognition", "miniverse.environment", "miniverse.templates"]
+
+[tool.setuptools.package-data]
+miniverse = ["templates/**/*.json", "templates/**/*.md"]
 
 [project.urls]
 Homepage = "https://github.com/miniverse-ai/miniverse"

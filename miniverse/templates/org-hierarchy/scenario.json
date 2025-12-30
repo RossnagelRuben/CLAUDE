@@ -1,0 +1,177 @@
+{
+  "name": "Operations Workshop",
+  "description": "Three-person maintenance crew coordinating tasks across the workshop floor.",
+  "initial_timestamp": "2160-03-21T08:00:00",
+  "environment": {
+    "metrics": {
+      "temperature_c": {
+        "value": 22.0,
+        "unit": "°C",
+        "label": "Ambient Temperature"
+      },
+      "floor_status": {
+        "value": "normal",
+        "label": "Floor Status"
+      }
+    }
+  },
+  "resources": {
+    "metrics": {
+      "power_kwh": {
+        "value": 120.0,
+        "unit": "kWh",
+        "label": "Battery Reserve"
+      },
+      "task_backlog": {
+        "value": 6,
+        "label": "Pending Tasks"
+      }
+    }
+  },
+  "environment_graph": {
+    "nodes": {
+      "ops": {
+        "name": "Operations Floor",
+        "capacity": 2
+      },
+      "workbench": {
+        "name": "Workbench",
+        "capacity": 1
+      },
+      "inventory": {
+        "name": "Inventory Bay",
+        "capacity": 1
+      }
+    },
+    "adjacency": {
+      "ops": ["workbench", "inventory"],
+      "workbench": ["ops"],
+      "inventory": ["ops"]
+    }
+  },
+  "agents": [
+    {
+      "profile": {
+        "agent_id": "lead",
+        "name": "Morgan Reyes",
+        "age": 33,
+        "background": "Floor lead ensuring throughput and safety.",
+        "role": "lead",
+        "personality": "driven",
+        "skills": {
+          "coordination": "expert",
+          "diagnostics": "advanced"
+        },
+        "goals": [
+          "Keep operations smooth",
+          "Reduce task backlog"
+        ],
+        "relationships": {
+          "tech": "Mentors on diagnostics",
+          "analyst": "Relies on data summaries"
+        }
+      },
+      "status": {
+        "agent_id": "lead",
+        "display_name": "Morgan Reyes",
+        "role": "lead",
+        "location": "ops",
+        "activity": null,
+        "attributes": {
+          "energy": {
+            "value": 80,
+            "unit": "%",
+            "label": "Energy"
+          },
+          "stress": {
+            "value": 35,
+            "unit": "%",
+            "label": "Stress"
+          }
+        }
+      }
+    },
+    {
+      "profile": {
+        "agent_id": "tech",
+        "name": "Lin Zhao",
+        "age": 29,
+        "background": "Maintenance technician specialising in life-support systems.",
+        "role": "technician",
+        "personality": "steady",
+        "skills": {
+          "repairs": "expert",
+          "analysis": "intermediate"
+        },
+        "goals": [
+          "Clear mechanical tickets",
+          "Monitor oxygen recyclers"
+        ],
+        "relationships": {
+          "lead": "Reports status updates",
+          "analyst": "Requests diagnostics"
+        }
+      },
+      "status": {
+        "agent_id": "tech",
+        "display_name": "Lin Zhao",
+        "role": "technician",
+        "location": "workbench",
+        "activity": null,
+        "attributes": {
+          "energy": {
+            "value": 76,
+            "unit": "%",
+            "label": "Energy"
+          },
+          "stress": {
+            "value": 28,
+            "unit": "%",
+            "label": "Stress"
+          }
+        }
+      }
+    },
+    {
+      "profile": {
+        "agent_id": "analyst",
+        "name": "Jamie Rivera",
+        "age": 27,
+        "background": "Data analyst monitoring sensor trends.",
+        "role": "analyst",
+        "personality": "insightful",
+        "skills": {
+          "data_review": "expert",
+          "forecasting": "advanced"
+        },
+        "goals": [
+          "Highlight anomalies early",
+          "Support maintenance scheduling"
+        ],
+        "relationships": {
+          "lead": "Supplies dashboards",
+          "tech": "Flags potential failures"
+        }
+      },
+      "status": {
+        "agent_id": "analyst",
+        "display_name": "Jamie Rivera",
+        "role": "analyst",
+        "location": "ops",
+        "activity": null,
+        "attributes": {
+          "energy": {
+            "value": 82,
+            "unit": "%",
+            "label": "Energy"
+          },
+          "stress": {
+            "value": 25,
+            "unit": "%",
+            "label": "Stress"
+          }
+        }
+      }
+    }
+  ]
+}
