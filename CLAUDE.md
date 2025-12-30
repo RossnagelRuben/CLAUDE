@@ -130,6 +130,9 @@ miniverse run org-hierarchy --ticks 10 --output json
 # Reproducible run with seed
 miniverse run org-hierarchy --ticks 10 --seed 42
 
+# Quiet mode (suppress per-tick output)
+miniverse run org-hierarchy --ticks 10 --quiet
+
 # Debug mode (enables DEBUG_LLM, DEBUG_MEMORY, MINIVERSE_VERBOSE)
 miniverse run org-hierarchy --ticks 10 --debug
 
