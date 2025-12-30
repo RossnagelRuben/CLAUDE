@@ -1,165 +1,212 @@
 <p align="center"><img src=".github/images/header.png" alt="Miniverse header" width="75%"></p>
 
-<p align="center"><em>Build generative agent simulations.</em></p>
+<p align="center"><em>In silico social science. Simulate what you can't experiment on.</em></p>
 
 <p align="center">
   <a href="https://github.com/miniverse-ai/miniverse"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status"></a>
   <a href="https://github.com/miniverse-ai/miniverse"><img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python"></a>
-  <a href="https://github.com/miniverse-ai/miniverse"><img src="https://img.shields.io/badge/designed%20with-GPT--5%20Codex%20%26%20Claude-6f42c1" alt="Designed with AI"></a>
+  <a href="https://github.com/miniverse-ai/miniverse"><img src="https://img.shields.io/badge/designed%20with-Claude%20%26%20GPT--5-6f42c1" alt="Designed with AI"></a>
   <a href="https://x.com/local0ptimist"><img src="https://img.shields.io/badge/created%20by-@local0ptimist-1d9bf0" alt="Creator"></a>
 </p>
 
 ---
 
-Miniverse is a Python-first simulation library inspired by Stanford's [Generative Agents](https://arxiv.org/pdf/2304.03442) study. The goal is to give developers everything needed to build simulations with comparable fidelity: hard deterministic physics, partial observability, structured memories, and optional LLM cognition. It focuses on agent logic and state management rather than rendering.
+## What is Miniverse?
 
-You write the physics (`SimulationRules`), decide how much cognition stays deterministic versus LLM-driven, and the orchestrator composes those modules so you can run reproducible baselines or improvised experiments.
+Miniverse is a **CLI-first platform for computational social science and organizational simulation**.
 
-**Alpha:** APIs are still moving. Every breaking change is logged in `CHANGELOG.md` with context.
+Traditional social science has a fundamental limitation: you can't run experiments on societies. You can't A/B test policy changes, replay historical decisions, or observe counterfactuals.
 
-## Setup
+Miniverse changes this. Build believable agent simulations, inject interventions, and analyze what emerges—all reproducibly and at scale.
+
+**Use cases:**
+- How does a rumor spread through an organization?
+- What happens when you restructure teams?
+- Will this policy improve coordination or create friction?
+- How do information cascades form and break?
+
+**Alpha:** Core architecture is stable. CLI and research tooling under active development.
+
+---
+
+## Quick Start
 
 ```bash
-# clone the repository
+# Clone and install
 git clone https://github.com/miniverse-ai/miniverse.git
 cd miniverse
-
-# install dependencies into a local uv environment
 uv sync
+
+# Run workshop example (deterministic mode)
+uv run python examples/workshop/run.py --ticks 10
+
+# Run with LLM cognition
+export LLM_PROVIDER=openai
+export LLM_MODEL=gpt-4o
+export OPENAI_API_KEY=your_key
+uv run python examples/workshop/run.py --llm --ticks 10
 ```
 
-Run examples with `uv run ...`. A PyPI package is not published yet.
+---
 
-## Tour the examples
+## How It Works
 
-Each example folder ships a README with prompts, flags, and debugging tips.
+Miniverse combines **deterministic physics** with **emergent LLM cognition**:
 
-### Workshop progression (`examples/workshop/`)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         TICK LOOP                                │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Physics      │  SimulationRules update resources, events    │
+│  2. Perception   │  Build partial observability for each agent  │
+│  3. Cognition    │  Planner/executor decide actions (LLM/rule)  │
+│  4. Actions      │  Process actions, update world state         │
+│  5. Memory       │  Store observations for future context       │
+│  6. Reflection   │  Periodic synthesis of experiences           │
+│  7. Persistence  │  Save state for analysis and replay          │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-1. `01_hello_world` - Single deterministic agent, minimal `SimulationRules`. Run: `uv run python -m examples.workshop.01_hello_world.run`
-2. `02_deterministic` - Multiple agents with threshold logic and resource coupling.
-3. `03_llm_single` - Swaps in `LLMExecutor`; requires `LLM_PROVIDER`, `LLM_MODEL`, and a provider API key.
-4. `04_team_chat` - Natural-language coordination via the `communication` field; memories capture transcripts.
-5. `05_stochastic` - Adds randomness to physics while LLM cognition adapts.
-6. `monte_carlo.py` - Batch runner executing many trials with different seeds, printing statistics (mean backlog, clearance rate, worst case).
+**Physics is predictable.** You control resource dynamics, constraints, and events.
 
-`examples/workshop/run.py` ties these ideas together: deterministic baseline by default, `--llm` flag, cadence controls, optional world-engine calls, and per-tick analysis hooks.
+**Cognition is emergent.** Agents plan, communicate, and adapt based on their goals, personality, and memories.
 
-### Snake (`examples/snake/run.py`)
+---
 
-- Tier-2 grid world with deterministic movement and ASCII perception windows.
-- Demonstrates how `customize_perception()` can inject readable summaries while keeping structured data intact.
+## Examples
 
-Run: `uv run python -m examples.snake.run --ticks 40`
+### Workshop Scenario
 
-### Smallville Valentine's micro-replication (`examples/smallville/`)
+A team coordination simulation with mechanics, analysts, and supervisors managing a repair backlog.
 
-- Recreates the Generative Agents Valentine's scenario with planning, execution, reflection, and memory streams.
-- Debug flags (`DEBUG_LLM`, `DEBUG_MEMORY`, `MINIVERSE_VERBOSE`) surface prompts, memories, and world updates.
+```bash
+# Deterministic baseline
+uv run python examples/workshop/run.py --ticks 20
 
-Run:
+# With LLM cognition
+uv run python examples/workshop/run.py --llm --ticks 20
+
+# Monte Carlo (100 trials with different seeds)
+uv run python examples/workshop/monte_carlo.py --runs 100 --ticks 20
+```
+
+### Snake (Grid World)
+
+Tier-2 spatial simulation demonstrating grid-based movement and ASCII perception.
+
+```bash
+uv run python examples/snake/run.py --ticks 40
+```
+
+### Smallville Valentine's
+
+Recreation of Stanford Generative Agents' party coordination scenario.
 
 ```bash
 export LLM_PROVIDER=openai
-export LLM_MODEL=gpt-5-nano
-export OPENAI_API_KEY=sk-your-key
+export LLM_MODEL=gpt-4o
 uv run python examples/smallville/valentines_party.py
 ```
 
-The folder includes a notebook and notes detailing the replication.
+---
 
-## How a tick works
+## Architecture
 
-1. `SimulationRules.apply_tick()` updates deterministic physics (resource drains, stochastic events).
-2. `build_agent_perception()` enforces partial observability (own status, shared dashboards, broadcasts, direct messages, optional grid window).
-3. Executors (deterministic or `LLMExecutor`) return an `AgentAction` per agent.
-4. `SimulationRules.process_actions()` can resolve the world; otherwise the world-engine LLM processes the actions.
-5. Persistence stores the new `WorldState` and actions (`InMemoryPersistence`, `JsonPersistence`, or `PostgresPersistence`).
-6. `MemoryStrategy` records observations so agents have context on the next tick.
+### Core Components
 
-Hooks such as `customize_perception()`, `should_stop()`, cadence utilities, and tick listeners let you adjust behavior without editing the orchestrator.
+| Component | Purpose |
+|-----------|---------|
+| **Orchestrator** | Tick loop, dependency injection, persistence |
+| **SimulationRules** | Deterministic physics (resources, constraints, events) |
+| **Cognition Stack** | Planner, executor, reflection, scratchpad |
+| **Memory Strategy** | Store and retrieve agent experiences |
+| **Persistence** | Save state (in-memory, JSON, PostgreSQL) |
+| **Environment** | Tier 0 (abstract), Tier 1 (graph), Tier 2 (grid) |
 
-## Minimal harness
+### Design Principles
 
-```python
-from pathlib import Path
-from miniverse import Orchestrator, SimulationRules, ScenarioLoader, build_default_cognition
-from miniverse.schemas import AgentAction, WorldState
+1. **CLI-First**: Every feature usable from command line
+2. **Dependency Injection**: Swap strategies without modifying core
+3. **Reproducibility**: Seed everything, log everything
+4. **Research-Ready**: Structured outputs for statistical analysis
 
-loader = ScenarioLoader(scenarios_dir=Path("examples/scenarios"))
-world_state, profiles = loader.load("workshop_baseline")
-agents = {profile.agent_id: profile for profile in profiles}
+---
 
-class WorkshopRules(SimulationRules):
-    def apply_tick(self, state: WorldState, tick: int) -> WorldState:
-        updated = state.model_copy(deep=True)
-        backlog = updated.resources.get_metric("task_backlog", default=6, label="Task Backlog")
-        backlog.value = max(0, int(backlog.value) - 1)
-        return updated
+## Debugging
 
-    def validate_action(self, action: AgentAction, state: WorldState) -> bool:
-        return True
+```bash
+# Show LLM prompts and responses
+DEBUG_LLM=true uv run python examples/workshop/run.py --llm
 
-world_prompt = "You are the world engine. Apply validated actions deterministically."
-agent_prompts = {
-    agent_id: f"You are {profile.name}, a {profile.role}. Return an AgentAction JSON."
-    for agent_id, profile in agents.items()
-}
+# Show memory operations
+DEBUG_MEMORY=true uv run python examples/workshop/run.py --llm
 
-cognition = {agent_id: build_default_cognition() for agent_id in agents}
+# Show agent perceptions
+DEBUG_PERCEPTION=true uv run python examples/workshop/run.py --llm
 
-orchestrator = Orchestrator(
-    world_state=world_state,
-    agents=agents,
-    world_prompt=world_prompt,
-    agent_prompts=agent_prompts,
-    simulation_rules=WorkshopRules(),
-    agent_cognition=cognition,
-)
-
-result = await orchestrator.run(num_ticks=10)
+# Maximum verbosity
+DEBUG_LLM=true DEBUG_MEMORY=true MINIVERSE_VERBOSE=true \
+  uv run python examples/workshop/run.py --llm
 ```
 
-Swap agents to `LLMExecutor`, add planners (`LLMPlanner` or deterministic alternatives), and wire reflection engines when you need higher-fidelity cognition.
-
-## Library map
-
-- **Orchestrator (`miniverse/orchestrator.py`)** - tick loop, prompt preflight, persistence/memory integration, cadence handling.
-- **Simulation rules (`miniverse/simulation_rules.py`)** - deterministic physics, validation, optional deterministic `process_actions()`, lifecycle hooks.
-- **Perception (`miniverse/perception.py`)** - Stanford-style partial observability with grid visibility and ASCII helpers.
-- **Cognition (`miniverse/cognition/`)** - planners, executors, reflection engines, prompt rendering, cadence utilities, scratchpads.
-- **Memory (`miniverse/memory.py`)** - FIFO default; extend for weighted or semantic retrieval.
-- **Persistence (`miniverse/persistence.py`)** - async backends for state, actions, memories.
-- **Environment helpers (`miniverse/environment/`)** - graph occupancy, BFS pathfinding, grid move validation, visibility rendering.
-- **LLM utilities (`miniverse/llm_calls.py`, `miniverse/llm_utils.py`)** - structured calls with schema validation and retry feedback.
-- **Scenario loader (`miniverse/scenario.py`)** - JSON-to-world-state converter.
-
-## Debugging and analysis
-
-- `DEBUG_LLM=1` prints prompts and responses.
-- `DEBUG_MEMORY=1` logs memory writes and retrievals.
-- Tick listeners (`tick_listeners` argument on `Orchestrator`) let you stream metrics or run custom analysis.
-- The Monte Carlo script shows how to batch runs with different seeds and summarize outcomes.
+---
 
 ## Documentation
 
-- `docs/USAGE.md` - scenario authoring, cognition wiring, cadence decisions.
-- `docs/PROMPTS.md` - renderer placeholders, action catalog formatting, template conventions.
-- `docs/architecture/` - deep dives on cognition flow, environment tiers, persistence design.
-- `docs/RESEARCH.md` - research notes referencing Stanford Generative Agents, Smallville-inspired studies, branching narrative systems, structured simulation-state management, and other sources catalogued in `docs/research/`.
-- `ISSUES.md` - active investigations and roadmap items.
+| Document | Purpose |
+|----------|---------|
+| [VISION.md](VISION.md) | Project direction and goals |
+| [ROADMAP.md](ROADMAP.md) | Implementation phases |
+| [CLAUDE.md](CLAUDE.md) | Development guidelines |
+| [ISSUES.md](ISSUES.md) | Known issues and priorities |
+| [docs/USAGE.md](docs/USAGE.md) | Building simulations |
+| [docs/PROMPTS.md](docs/PROMPTS.md) | Prompt system guide |
+| [docs/architecture/](docs/architecture/) | Deep dives |
+
+---
+
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for full details.
+
+**Phase 1: CLI Foundation** – `miniverse init/run/analyze/export`
+**Phase 2: Validation** – Replicate known social science findings
+**Phase 3: Intervention** – Fork simulations, inject changes, compare outcomes
+**Phase 4: Scoring** – Multi-dimensional behavioral evaluation
+**Phase 5: Skill** – Claude Code integration for guided workflows
+**Phase 6: Export** – Research-ready data formats
+**Phase 7: Calibration** – Validate against real-world data
+
+---
 
 ## Contributing
 
-- Run `uv run pytest` before opening a PR.
-- Keep changes scoped; include transcripts or logs when demonstrating new agent behavior.
-- We welcome new scenarios, physics modules, cognition strategies, and tooling improvements.
+```bash
+# Run tests before submitting
+UV_CACHE_DIR=.uv-cache uv run pytest
+```
+
+- Read [VISION.md](VISION.md) to understand direction
+- Check [ROADMAP.md](ROADMAP.md) for what to work on
+- Keep changes focused; include test coverage
+- Update docs when changing behavior
+
+---
+
+## Inspirations
+
+- [Stanford Generative Agents](https://arxiv.org/abs/2304.03442) – Original emergent behavior research
+- [Anthropic Petri](https://github.com/anthropics/petri) – Auditing patterns (branching, scoring)
+- [AgentTorch](https://github.com/AgentTorch/AgentTorch) – Large-scale policy simulation
+- [Mesa](https://github.com/projectmesa/mesa) – Python ABM framework
+
+---
 
 ## Credits
 
 - Creator: [Kenneth / @local0ptimist](https://x.com/local0ptimist)
-- Co-conspirators: GPT-5 Codex, Claude Code, and everyone building stranger simulations than we predicted.
-- Research inspirations: detailed commentary lives in [`docs/RESEARCH.md`](docs/RESEARCH.md) and `docs/research/`.
+- Built with: Claude, GPT-5 Codex
+- Research notes: [docs/RESEARCH.md](docs/RESEARCH.md)
 
 ## License
 
