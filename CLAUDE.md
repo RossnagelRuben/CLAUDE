@@ -31,14 +31,18 @@ The goal: let researchers run "what if" experiments on social dynamics that are 
 
 ### Current Status
 
-The library core is solid:
+**Phase 1 (CLI Foundation) complete** on branch `cev-redesign`:
+- `miniverse run/list/info` commands working
+- Template system with `org-hierarchy` scenario
+- 43 tests passing
+
+Library core is solid:
 - Orchestrator with dependency injection
 - Cognition stack (planner, executor, reflection)
 - Memory and persistence strategies
 - Environment tiers (abstract → graph → grid)
-- 39 passing tests
 
-**Active work** (branch `cev-redesign`): Building CLI, scenario templates, validation infrastructure per ROADMAP.md.
+**Next**: Phase 2 (Validation) - replicate known social science findings.
 
 ---
 
@@ -49,11 +53,19 @@ The library core is solid:
 Every feature should be usable from the command line. The library exists to support the CLI, not the other way around.
 
 ```bash
-# This is the target interface
-miniverse init --template org-hierarchy
-miniverse run --ticks 100 --seed 42
-miniverse analyze --metrics diffusion,coordination
-miniverse export --format csv
+# Currently implemented (Phase 1)
+miniverse list                                    # Show available scenarios
+miniverse info org-hierarchy                      # Show scenario details
+miniverse run org-hierarchy --ticks 10            # Deterministic mode
+miniverse run org-hierarchy --ticks 10 --llm      # LLM cognition
+miniverse run org-hierarchy --ticks 10 --output json  # JSON output
+miniverse run org-hierarchy --ticks 10 --seed 42  # Reproducible
+
+# Planned (Phase 2+)
+miniverse init --template <name>                  # Generate new scenario
+miniverse analyze --metrics diffusion             # Post-run analysis
+miniverse compare baseline treatment              # Compare branches
+miniverse export --format csv                     # Export for R/Python
 ```
 
 ### 2. Research Validity
@@ -78,13 +90,13 @@ Design for Claude to operate. The `/miniverse` skill should let Claude guide use
 
 | File | Purpose |
 |------|---------|
-| `miniverse/cli.py` | CLI entry point (target: Phase 1) |
+| `miniverse/cli.py` | CLI entry point (run/list/info commands) |
+| `miniverse/templates/` | Scenario templates (org-hierarchy implemented) |
 | `miniverse/orchestrator.py` | Simulation loop, dependency injection |
 | `miniverse/schemas.py` | All Pydantic models |
 | `miniverse/cognition/` | Planner, executor, reflection, prompts |
 | `miniverse/memory.py` | Memory strategies |
 | `miniverse/persistence.py` | State persistence backends |
-| `miniverse/templates/` | Scenario templates (target: Phase 1) |
 
 ### Common Commands
 
@@ -95,20 +107,34 @@ uv sync
 # Run tests
 UV_CACHE_DIR=.uv-cache uv run pytest
 
-# Run workshop example (deterministic)
-uv run python examples/workshop/run.py --ticks 6
+# --- CLI Commands (Phase 1 complete) ---
 
-# Run workshop example (LLM cognition)
+# List available scenarios
+miniverse list
+
+# Show scenario details
+miniverse info org-hierarchy
+
+# Run simulation (deterministic - no API key needed)
+miniverse run org-hierarchy --ticks 10
+
+# Run simulation (LLM cognition)
 export LLM_PROVIDER=openai
 export LLM_MODEL=gpt-4o
 export OPENAI_API_KEY=your_key
-uv run python examples/workshop/run.py --llm --ticks 8
+miniverse run org-hierarchy --ticks 10 --llm
 
-# Debug flags
-DEBUG_LLM=true      # Show all LLM prompts/responses
-DEBUG_MEMORY=true   # Show memory operations
-DEBUG_PERCEPTION=true  # Show agent perceptions
-MINIVERSE_VERBOSE=true # Show action details
+# JSON output for scripts
+miniverse run org-hierarchy --ticks 10 --output json
+
+# Reproducible run with seed
+miniverse run org-hierarchy --ticks 10 --seed 42
+
+# Debug mode (enables DEBUG_LLM, DEBUG_MEMORY, MINIVERSE_VERBOSE)
+miniverse run org-hierarchy --ticks 10 --debug
+
+# --- Legacy Example (still works) ---
+uv run python examples/workshop/run.py --ticks 6
 ```
 
 ---

@@ -8,21 +8,22 @@ This document translates VISION.md into actionable implementation phases. Each p
 
 ## Current State
 
-Miniverse has a solid foundation:
-- Orchestrator with dependency injection
-- Cognition stack (planner, executor, reflection)
-- Memory strategies with persistence backends
-- Environment tiers (abstract → graph → grid)
-- 39 passing tests
-- Workshop example demonstrating both deterministic and LLM modes
+**Phase 1 (CLI Foundation) is COMPLETE** as of 2025-12-29.
 
-**What's missing for the CEV vision:**
-- CLI interface (currently library-only)
-- Scenario templates for social science research
-- Branching/intervention capabilities
-- Multi-dimensional behavioral scoring
-- Research-ready export formats
-- Claude Code skill for guided simulation design
+Implemented:
+- `miniverse run/list/info` commands via Typer CLI
+- Template system with dynamic rules loading
+- `org-hierarchy` scenario template
+- JSON output mode for scripts/Claude
+- Deterministic and LLM cognition modes
+- 43 tests passing
+
+**What's still needed:**
+- More scenario templates (information-cascade, coordination-game)
+- Branching/intervention capabilities (Phase 3)
+- Multi-dimensional behavioral scoring (Phase 4)
+- Research-ready export formats (Phase 6)
+- Claude Code skill for guided simulation design (Phase 5)
 
 ---
 
