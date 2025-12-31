@@ -61,6 +61,13 @@ miniverse run org-hierarchy --ticks 10 --llm      # LLM cognition
 miniverse run org-hierarchy --ticks 10 --output json  # JSON output
 miniverse run org-hierarchy --ticks 10 --seed 42  # Reproducible
 
+# Performance tuning (Phase 1.1)
+miniverse run org-hierarchy --ticks 10 --llm --world-engine deterministic  # Fast LLM mode
+
+# Provider options (set via environment)
+export LLM_PROVIDER=ollama LLM_MODEL=llama3.2     # Local models via Ollama
+export LLM_PROVIDER=openai LLM_MODEL=gpt-5-nano   # Fast OpenAI model
+
 # Planned (Phase 2+)
 miniverse init --template <name>                  # Generate new scenario
 miniverse analyze --metrics diffusion             # Post-run analysis

@@ -1,6 +1,6 @@
 # Miniverse Roadmap
 
-_Last updated: 2025-12-29_
+_Last updated: 2025-12-30_
 
 This document translates VISION.md into actionable implementation phases. Each phase is designed to be independently valuable—we ship working software at each milestone.
 
@@ -8,22 +8,25 @@ This document translates VISION.md into actionable implementation phases. Each p
 
 ## Current State
 
-**Phase 1 (CLI Foundation) is COMPLETE** as of 2025-12-29.
+**Phase 1 (CLI Foundation): COMPLETE** (2025-12-29)
+**Phase 1.1 (LLM Performance): COMPLETE** (2025-12-30)
 
-Implemented:
+### What's implemented:
 - `miniverse run/list/info` commands via Typer CLI
 - Template system with dynamic rules loading
-- `org-hierarchy` scenario template
+- `org-hierarchy` scenario template (3 agents, graph environment)
 - JSON output mode for scripts/Claude
 - Deterministic and LLM cognition modes
+- `--world-engine` flag to decouple agent cognition from world updates
+- Ollama support for local open-source models
+- Default model: gpt-5-nano
 - 43 tests passing
 
-**What's still needed:**
-- More scenario templates (information-cascade, coordination-game)
-- Branching/intervention capabilities (Phase 3)
-- Multi-dimensional behavioral scoring (Phase 4)
-- Research-ready export formats (Phase 6)
-- Claude Code skill for guided simulation design (Phase 5)
+### What's next (Priority order):
+1. **Memory system upgrade** - BM25 ranking, smarter retrieval (blocks Phase 2)
+2. **Prompt optimization** - Reduce token usage, improve context building
+3. **More scenario templates** - information-cascade, coordination-game (Phase 2)
+4. **Branching/intervention** - Fork simulations, inject changes (Phase 3)
 
 ---
 
@@ -333,6 +336,35 @@ Implemented:
 
 ---
 
+## Phase 1.5: Memory & Prompt Quality (NEW)
+
+**Goal**: Improve agent cognition quality before adding more features.
+
+### Deliverables
+
+1. **BM25 Memory Retrieval**
+   - Port BM25 implementation from Stanford Valentines project
+   - Replace naive substring matching in `get_relevant_memories()`
+   - Weight by: term frequency, recency, importance
+
+2. **Prompt Optimization**
+   - Reduce executor prompt from ~150 lines of examples
+   - Smarter context building (not just JSON dumps)
+   - Template-specific prompt tuning
+
+3. **Memory Debugging**
+   - `--debug` mode shows what memories are retrieved
+   - Visibility into what context agents actually see
+
+### Success Criteria
+- [ ] `get_relevant_memories()` uses BM25 ranking
+- [ ] Executor prompts < 50 lines of examples
+- [ ] Debug mode shows memory retrieval clearly
+
+### Estimated Effort: 1 week
+
+---
+
 ## Deferred / Future Work
 
 These are valuable but not on the critical path:
@@ -340,8 +372,8 @@ These are valuable but not on the critical path:
 ### Visualization Dashboard
 The existing `plan.md` describes a visualization system. This is still valuable but secondary to research utility. Defer until core platform is solid.
 
-### Advanced Memory Retrieval
-BM25, embeddings, semantic search. Important for realism but not blocking for MVP.
+### Embedding-Based Memory
+Semantic search using embeddings. Deferred until BM25 proves insufficient.
 
 ### Multi-Model Comparison
 Run same scenario across GPT-4, Claude, Gemini. Useful for robustness testing.

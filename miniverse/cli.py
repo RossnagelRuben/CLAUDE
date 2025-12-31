@@ -71,6 +71,12 @@ def run(
         "-d",
         help="Enable debug logging (sets DEBUG_LLM, DEBUG_MEMORY, MINIVERSE_VERBOSE)",
     ),
+    world_engine: str = typer.Option(
+        "deterministic",
+        "--world-engine",
+        "-w",
+        help="World update mode: 'deterministic' (default, reproducible), 'llm' (emergent events), 'auto' (LLM if available)",
+    ),
 ) -> None:
     """Run a simulation with the specified scenario."""
     asyncio.run(
@@ -82,6 +88,7 @@ def run(
             output_format=output,
             quiet=quiet,
             debug=debug,
+            world_engine_mode=world_engine,
         )
     )
 
@@ -187,6 +194,7 @@ async def _run_simulation(
     output_format: str,
     quiet: bool,
     debug: bool,
+    world_engine_mode: str,
 ) -> None:
     """Core simulation execution logic."""
     import contextlib
@@ -266,6 +274,7 @@ async def _run_simulation(
         llm_provider=provider,
         llm_model=model,
         simulation_rules=rules,
+        world_update_mode=world_engine_mode,
         agent_cognition=cognition_map,
     )
 

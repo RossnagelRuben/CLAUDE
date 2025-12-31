@@ -1,56 +1,66 @@
 # Outstanding Issues
 
-_Last updated: 2025-12-29_
+_Last updated: 2025-12-30_
 
 This file tracks known issues aligned with the current direction (see VISION.md, ROADMAP.md).
 
 ---
 
-## Critical Path Issues
+## Resolved (Phase 1 + 1.1)
 
-These block Phase 1-3 of the roadmap.
+These were critical path blockers, now complete:
 
-### P0: CLI Entry Point Missing
-
-**Problem**: Miniverse is library-only. No `miniverse` command exists.
-
-**Impact**:
-- Users must write Python to run simulations
-- Claude can't operate Miniverse via Bash
-- Blocks AI-native workflow vision
-
-**Plan** (Phase 1):
-1. Create `miniverse/cli.py` using `click` or `typer`
-2. Implement: `init`, `run`, `status`, `export`
-3. Wire into `pyproject.toml` entry points
-4. Add scenario templates to `miniverse/templates/`
-
-**Effort**: 1-2 weeks
+- ~~P0: CLI Entry Point~~ → `miniverse run/list/info` implemented
+- ~~P1: No Scenario Templates~~ → `org-hierarchy` template complete
+- ~~LLM Performance~~ → `--world-engine deterministic` flag, gpt-5-nano default, Ollama support
 
 ---
 
-### P1: No Scenario Templates
+## Active Issues
 
-**Problem**: Users must create scenarios from scratch. No starting points for common research questions.
+### A1: Memory Retrieval Quality (HIGH PRIORITY)
+
+**Problem**: `SimpleMemoryStream.get_relevant_memories()` uses naive substring matching. No TF-IDF, no BM25, no semantic ranking.
 
 **Impact**:
-- High barrier to entry
-- Can't demonstrate value quickly
-- Blocks validation work (Phase 2)
+- Agents retrieve irrelevant memories
+- Important context gets lost in FIFO ordering
+- Blocks realistic social dynamics (Phase 2 validation)
 
-**Plan** (Phase 1):
-1. Create `miniverse/templates/` directory
-2. Build 3 initial templates:
-   - `org-hierarchy` – Basic org structure
-   - `information-cascade` – Rumor spread
-   - `coordination-game` – Team coordination
-3. Each template includes: scenario.json + rules.py + README
+**Current state**:
+- `ImportanceWeightedMemory` exists but barely used
+- Importance scores stored but not weighted properly
+- No term frequency consideration
 
-**Effort**: 1 week
+**Plan** (Phase 1.5):
+1. Port BM25 implementation from Stanford Valentines project
+2. Replace substring matching with proper TF-IDF scoring
+3. Combine: BM25 relevance + recency decay + importance boost
+4. Add memory retrieval to `--debug` output
+
+**Effort**: 2-3 days
 
 ---
 
-### P2: No Branching/Fork Capability
+### A2: Prompt Token Bloat
+
+**Problem**: Executor prompt template is ~150 lines of examples. Context building just dumps JSON.
+
+**Impact**:
+- Wasted tokens on verbose examples
+- Slow inference, higher cost
+- Less room for actual agent context
+
+**Plan** (Phase 1.5):
+1. Trim executor examples to 2-3 concise cases
+2. Build context summaries instead of raw JSON dumps
+3. Template-specific prompt tuning in rules.py
+
+**Effort**: 1-2 days
+
+---
+
+### A3: No Branching/Fork Capability
 
 **Problem**: Can't fork a simulation to test counterfactuals. No intervention API.
 
@@ -69,46 +79,7 @@ These block Phase 1-3 of the roadmap.
 
 ---
 
-## Important Issues
-
-These affect quality but don't block critical path.
-
-### A3: Memory Retrieval Quality
-
-**Problem**: `SimpleMemoryStream.get_relevant_memories()` uses naive substring matching.
-
-**Impact**:
-- Poor ranking for semantically similar queries
-- Users forced to write custom retrieval for quality scenarios
-
-**Plan**:
-- Short-term: Document limitations, provide example embedding adapter
-- Mid-term: Implement importance + recency + semantic retrieval
-- Future: BM25 hybrid as optional package
-
-**Effort**: 2-4 hours for docs; more for algorithmic upgrade
-
----
-
-### A8: Logging UX
-
-**Problem**: Debug output is hard to follow. Agent decisions scattered across phases.
-
-**Impact**:
-- 888KB log files with 5% signal
-- Key information buried in JSON
-- Hard to debug agent behavior
-
-**Plan**:
-1. Add `MINIVERSE_LOG_LEVEL=0|1|2|3` (minimal/summary/detailed/debug)
-2. Group output by agent, not by phase
-3. Show message content in summaries
-
-**Effort**: 1-2 days for Phase 1
-
----
-
-### A9: No Behavioral Scoring
+### A4: No Behavioral Scoring
 
 **Problem**: No systematic way to evaluate agent behavior across dimensions.
 
@@ -126,7 +97,7 @@ These affect quality but don't block critical path.
 
 ---
 
-### A10: No Research Export
+### A5: No Research Export
 
 **Problem**: Outputs not directly usable in R/Python/Stata workflows.
 
@@ -146,53 +117,38 @@ These affect quality but don't block critical path.
 
 ## Deferred Issues
 
-These are valuable but not on the critical path.
-
 ### D1: Visualization Dashboard
 
-The old `plan.md` described a web visualization system. This remains valuable but is deferred until core research platform is solid.
+The old `plan.md` described a web visualization system. Deferred until core research platform is solid.
 
-**Archived**: `docs/archive/plan-visualization-2025-03.md`
+### D2: Embedding-Based Memory
 
----
-
-### D2: Advanced Memory (Embeddings/BM25)
-
-Semantic memory retrieval would improve agent behavior realism. Deferred until validation confirms baseline is useful.
-
----
+Semantic memory retrieval with embeddings. Deferred until BM25 proves insufficient.
 
 ### D3: Multi-Model Comparison
 
-Run same scenario across GPT-4, Claude, Gemini to test robustness. Useful for research but later.
+Run same scenario across GPT-4, Claude, Gemini. Useful for research but later.
 
 ---
 
 ## Test/Build Status
 
-- Unit/integration tests: 39 passing
+- Unit/integration tests: 43 passing
 - Branch: `cev-redesign` (active development)
-- Last test run: `UV_CACHE_DIR=.uv-cache uv run pytest`
+- Last test run: `UV_CACHE_DIR=.uv-cache uv run python -m pytest`
 
 ---
 
-## Issue Lifecycle
+## Priority Order
 
-1. **New issues** go in appropriate priority section
-2. **Working on it** → move to top of section, add "WIP:" prefix
-3. **Resolved** → remove from this file, note in commit/PR
-4. **Deferred** → move to Deferred section with rationale
-
----
-
-## Document Owner
-
-Kenneth ([@local0ptimist](https://x.com/local0ptimist))
-
-Next review: After Phase 1 complete
+1. **A1: Memory Retrieval** - Blocks realistic agent behavior
+2. **A2: Prompt Optimization** - Quick win for performance
+3. **A3: Branching** - Core research capability
+4. **A4: Scoring** - Quantify results
+5. **A5: Export** - Research workflow integration
 
 ---
 
 _This file complements ROADMAP.md. Roadmap = what we're building. Issues = what's blocking us._
 
--- Claude | 2025-12-29
+-- Shoshin | 2025-12-30
