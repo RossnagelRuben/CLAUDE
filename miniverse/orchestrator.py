@@ -513,28 +513,50 @@ class Orchestrator:
 
         # A2: Do not read messages from actions. Messages are sourced from memories.
 
-        # Retrieve structured memory objects (AgentMemory instances) once.
-        # We'll use these for both perception (as strings) and prompt context (as objects).
-        # This eliminates the dual-fetch pattern that was confusing and inefficient.
+        # Get current plan step to use as memory retrieval query.
+        # This enables BM25 to surface relevant memories based on what agent is doing.
+        existing_plan = self._get_scratchpad_value(cognition, "plan")
+        existing_plan_index = self._get_scratchpad_value(cognition, "plan_index", 0)
+        memory_query = ""
+        if isinstance(existing_plan, Plan) and existing_plan.steps:
+            idx = min(existing_plan_index, len(existing_plan.steps) - 1)
+            current_step = existing_plan.steps[idx]
+            memory_query = current_step.description
+
+        # Retrieve memories via the memory strategy (BM25, importance-weighted, etc.)
+        # If we have a query (from plan step), use get_relevant_memories for BM25 ranking.
+        # Otherwise fall back to get_recent_memories for recency-based retrieval.
+        if memory_query:
+            recent_memory_strings = await self.memory.get_relevant_memories(
+                self.run_id, agent_id, query=memory_query, limit=10
+            )
+        else:
+            recent_memory_strings = await self.memory.get_recent_memories(
+                self.run_id, agent_id, limit=10
+            )
+
+        # Also get structured memory objects for message extraction and debug output.
+        # This goes to persistence directly since we need the full AgentMemory objects.
         recent_agent_memories = await self.persistence.get_recent_memories(
             self.run_id, agent_id, limit=10
         )
 
-        # Convert memories to strings for perception's recent_observations field.
-        # Perception displays these in human-readable format for agent decision-making.
-        recent_memory_strings = [m.content for m in recent_agent_memories]
-
         # Get debug flag once at top of function
         debug_memory = os.getenv("DEBUG_MEMORY")
 
-        # DEBUG_MEMORY: Show what memories agent retrieved
+        # DEBUG_MEMORY: Show what memories agent retrieved and the query used
         if debug_memory:
-            print(colored(f"\n  [DEBUG_MEMORY] {agent_name} - Retrieved {len(recent_agent_memories)} memories:", Color.CYAN))
-            for i, mem in enumerate(recent_agent_memories[:5], 1):  # Show first 5
-                mem_preview = mem.content[:80] + "..." if len(mem.content) > 80 else mem.content
-                print(colored(f"    {i}. [Tick {mem.tick}, Imp: {mem.importance}] {mem_preview}", Color.CYAN))
-            if len(recent_agent_memories) > 5:
-                print(colored(f"    ... and {len(recent_agent_memories) - 5} more", Color.CYAN))
+            if memory_query:
+                query_preview = memory_query[:50] + "..." if len(memory_query) > 50 else memory_query
+                print(colored(f"\n  [DEBUG_MEMORY] {agent_name} - BM25 query: \"{query_preview}\"", Color.CYAN))
+            else:
+                print(colored(f"\n  [DEBUG_MEMORY] {agent_name} - No query (using recency only)", Color.CYAN))
+            print(colored(f"  [DEBUG_MEMORY] Retrieved {len(recent_memory_strings)} memories:", Color.CYAN))
+            for i, mem_str in enumerate(recent_memory_strings[:5], 1):  # Show first 5
+                mem_preview = mem_str[:80] + "..." if len(mem_str) > 80 else mem_str
+                print(colored(f"    {i}. {mem_preview}", Color.CYAN))
+            if len(recent_memory_strings) > 5:
+                print(colored(f"    ... and {len(recent_memory_strings) - 5} more", Color.CYAN))
 
         # Build direct messages for this agent from recent memories (recipient entries only)
         recent_messages: List[Dict[str, str]] = []
