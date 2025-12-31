@@ -23,7 +23,7 @@ from .llm_calls import process_world_update
 from .schemas import AgentProfile, WorldState, AgentAction, AgentMemory
 from .simulation_rules import SimulationRules, format_resources_generic
 from .persistence import PersistenceStrategy, InMemoryPersistence
-from .memory import MemoryStrategy, SimpleMemoryStream
+from .memory import MemoryStrategy, SimpleMemoryStream, BM25MemoryStrategy
 from .logging_utils import (
     colored,
     Color,
@@ -147,7 +147,7 @@ class Orchestrator:
             llm_model: Optional model identifier (e.g., "gpt-5-nano")
             simulation_rules: Optional SimulationRules for deterministic physics
             persistence: Optional persistence strategy (defaults to InMemory)
-            memory: Optional memory strategy (defaults to SimpleMemoryStream)
+            memory: Optional memory strategy (defaults to BM25MemoryStrategy)
             agent_cognition: Optional mapping of agent_id to AgentCognition;
                 defaults provide empty planner/executor/reflection stacks.
             tick_listeners: Optional callables invoked after each tick for
@@ -165,10 +165,10 @@ class Orchestrator:
         self._world_llm_warning_emitted = False
 
         # Use defaults if strategies not provided. InMemoryPersistence is fastest for
-        # prototyping but data is lost after run. SimpleMemoryStream uses the same
-        # persistence backend to store and retrieve memories with recency-based filtering.
+        # prototyping but data is lost after run. BM25MemoryStrategy provides proper
+        # information retrieval with BM25 scoring, recency decay, and importance weighting.
         self.persistence = persistence or InMemoryPersistence()
-        self.memory = memory or SimpleMemoryStream(self.persistence)
+        self.memory = memory or BM25MemoryStrategy(self.persistence)
 
         # Prepare cognition modules per agent. Each agent gets a bundle containing
         # planner (generates multi-step plans), executor (chooses tick actions),
