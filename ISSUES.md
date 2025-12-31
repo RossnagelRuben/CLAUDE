@@ -6,59 +6,19 @@ This file tracks known issues aligned with the current direction (see VISION.md,
 
 ---
 
-## Resolved (Phase 1 + 1.1)
+## Resolved (Phase 1 + 1.1 + 1.5)
 
 These were critical path blockers, now complete:
 
 - ~~P0: CLI Entry Point~~ → `miniverse run/list/info` implemented
 - ~~P1: No Scenario Templates~~ → `org-hierarchy` template complete
 - ~~LLM Performance~~ → `--world-engine deterministic` flag, gpt-5-nano default, Ollama support
+- ~~A1: Memory Retrieval~~ → `BM25MemoryStrategy` with IDF scoring, recency decay, importance weighting
+- ~~A2: Prompt Bloat~~ → `execute_tick` prompt reduced from ~85 to ~20 lines (3 concise examples)
 
 ---
 
 ## Active Issues
-
-### A1: Memory Retrieval Quality (HIGH PRIORITY)
-
-**Problem**: `SimpleMemoryStream.get_relevant_memories()` uses naive substring matching. No TF-IDF, no BM25, no semantic ranking.
-
-**Impact**:
-- Agents retrieve irrelevant memories
-- Important context gets lost in FIFO ordering
-- Blocks realistic social dynamics (Phase 2 validation)
-
-**Current state**:
-- `ImportanceWeightedMemory` exists but barely used
-- Importance scores stored but not weighted properly
-- No term frequency consideration
-
-**Plan** (Phase 1.5):
-1. Port BM25 implementation from Stanford Valentines project
-2. Replace substring matching with proper TF-IDF scoring
-3. Combine: BM25 relevance + recency decay + importance boost
-4. Add memory retrieval to `--debug` output
-
-**Effort**: 2-3 days
-
----
-
-### A2: Prompt Token Bloat
-
-**Problem**: Executor prompt template is ~150 lines of examples. Context building just dumps JSON.
-
-**Impact**:
-- Wasted tokens on verbose examples
-- Slow inference, higher cost
-- Less room for actual agent context
-
-**Plan** (Phase 1.5):
-1. Trim executor examples to 2-3 concise cases
-2. Build context summaries instead of raw JSON dumps
-3. Template-specific prompt tuning in rules.py
-
-**Effort**: 1-2 days
-
----
 
 ### A3: No Branching/Fork Capability
 
@@ -141,11 +101,9 @@ Run same scenario across GPT-4, Claude, Gemini. Useful for research but later.
 
 ## Priority Order
 
-1. **A1: Memory Retrieval** - Blocks realistic agent behavior
-2. **A2: Prompt Optimization** - Quick win for performance
-3. **A3: Branching** - Core research capability
-4. **A4: Scoring** - Quantify results
-5. **A5: Export** - Research workflow integration
+1. **A3: Branching** - Core research capability (Phase 3)
+2. **A4: Scoring** - Quantify results (Phase 4)
+3. **A5: Export** - Research workflow integration (Phase 6)
 
 ---
 

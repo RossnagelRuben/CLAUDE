@@ -10,6 +10,7 @@ This document translates VISION.md into actionable implementation phases. Each p
 
 **Phase 1 (CLI Foundation): COMPLETE** (2025-12-29)
 **Phase 1.1 (LLM Performance): COMPLETE** (2025-12-30)
+**Phase 1.5 (Memory & Prompts): COMPLETE** (2025-12-30)
 
 ### What's implemented:
 - `miniverse run/list/info` commands via Typer CLI
@@ -20,13 +21,14 @@ This document translates VISION.md into actionable implementation phases. Each p
 - `--world-engine` flag to decouple agent cognition from world updates
 - Ollama support for local open-source models
 - Default model: gpt-5-nano
-- 43 tests passing
+- `BM25MemoryStrategy` with proper IDF scoring, recency decay, importance weighting
+- Trimmed executor prompts (~85 → ~20 lines)
+- 50 tests passing
 
 ### What's next (Priority order):
-1. **Memory system upgrade** - BM25 ranking, smarter retrieval (blocks Phase 2)
-2. **Prompt optimization** - Reduce token usage, improve context building
-3. **More scenario templates** - information-cascade, coordination-game (Phase 2)
-4. **Branching/intervention** - Fork simulations, inject changes (Phase 3)
+1. **More scenario templates** - information-cascade, coordination-game (Phase 2)
+2. **Branching/intervention** - Fork simulations, inject changes (Phase 3)
+3. **Behavioral scoring** - Quantify agent behavior (Phase 4)
 
 ---
 
@@ -336,32 +338,30 @@ This document translates VISION.md into actionable implementation phases. Each p
 
 ---
 
-## Phase 1.5: Memory & Prompt Quality (NEW)
+## Phase 1.5: Memory & Prompt Quality (COMPLETE)
 
 **Goal**: Improve agent cognition quality before adding more features.
 
 ### Deliverables
 
-1. **BM25 Memory Retrieval**
-   - Port BM25 implementation from Stanford Valentines project
-   - Replace naive substring matching in `get_relevant_memories()`
-   - Weight by: term frequency, recency, importance
+1. **BM25 Memory Retrieval** ✓
+   - Implemented `BM25MemoryStrategy` with Okapi BM25 scoring
+   - Added `tokenize()` and `compute_bm25_scores()` utilities
+   - Combined scoring: BM25 relevance + recency decay + importance weighting
 
-2. **Prompt Optimization**
-   - Reduce executor prompt from ~150 lines of examples
-   - Smarter context building (not just JSON dumps)
-   - Template-specific prompt tuning
+2. **Prompt Optimization** ✓
+   - Reduced `execute_tick` prompt from ~85 to ~20 lines
+   - 3 concise examples (work, communicate, move) instead of 7 verbose ones
 
-3. **Memory Debugging**
-   - `--debug` mode shows what memories are retrieved
-   - Visibility into what context agents actually see
+3. **Memory Debugging** (deferred)
+   - `--debug` mode exists but memory retrieval visibility not yet implemented
 
 ### Success Criteria
-- [ ] `get_relevant_memories()` uses BM25 ranking
-- [ ] Executor prompts < 50 lines of examples
-- [ ] Debug mode shows memory retrieval clearly
+- [x] `get_relevant_memories()` uses BM25 ranking
+- [x] Executor prompts < 50 lines of examples
+- [ ] Debug mode shows memory retrieval clearly (deferred)
 
-### Estimated Effort: 1 week
+### Completed: 2025-12-30
 
 ---
 
