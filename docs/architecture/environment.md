@@ -19,7 +19,7 @@ Miniverse supports multiple levels of environment fidelity so simulations can sc
   - Occupancy checks and capacity enforcement.
   - Path planning on the logical graph (shortest path, random walks, etc.).
   - Event routing (e.g., broadcast messages to all adjacent nodes).
-- Agents reference nodes in plan metadata (“move to operations”) and the executor ensures actions respect graph constraints. See `examples/workshop/scenario.json` for a Tier 1 example.
+- Agents reference nodes in plan metadata ("move to operations") and the executor ensures actions respect graph constraints. See `examples/workshop/scenario.yaml` for a Tier 1 example.
 
 ## Tier 2 – Spatial Grids
 
@@ -35,7 +35,7 @@ Miniverse supports multiple levels of environment fidelity so simulations can sc
 
 - `WorldState` carries optional `environment_graph` and `environment_grid` fields. Scenarios can populate one or both depending on fidelity needs.
 - Existing scenarios remain valid because the fields default to `None`.
-- `ScenarioLoader` now parses `environment_graph` and `environment_grid` keys from scenario JSON, returning populated `EnvironmentGraphState` / `EnvironmentGridState` objects that deterministic rules can consume.
+- `ScenarioLoader` now parses `environment_graph` and `environment_grid` keys from scenario files (YAML/JSON), returning populated `EnvironmentGraphState` / `EnvironmentGridState` objects that deterministic rules can consume.
 
 ## Deterministic Rules
 

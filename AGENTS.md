@@ -1,19 +1,42 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core logic lives in `miniverse/` (orchestrator, cognition, perception, persistence, schemas). Tests mirror that layout in `tests/`, providing focused `pytest` suites per subsystem. Simulation demos sit in `examples/`, where the workshop progression spans deterministic through LLM-driven agents. Deep dives and research notes are collected in `docs/`; build outputs gather in `dist/` and experiment traces in `runs/`.
+Core engine code lives in `miniverse/` (orchestrator, cognition, memory, persistence, schemas). Tests mirror module boundaries in `tests/`. Example/tutorial content lives in `examples/`. File-driven demo assets live in `demo/` (singular), not `demos/`, and should remain script + scenario driven (no demo-specific CLI command forks).
 
-## Build, Test, and Development Commands
-Use `uv sync` to install dependencies into the pinned environment (`uv.lock`). Run `uv run pytest` for the async test matrix, or narrow with `uv run pytest tests/test_orchestrator.py -k happy_path`. Execute scenarios via `uv run python -m examples.workshop.run --llm` or other module paths. During iteration, `uv run python -m miniverse.orchestrator` helps validate wiring and logging output.
+## Run & Development Commands
+Use `uv sync` to install pinned deps (`uv.lock`). Main CLI entrypoint is:
+
+- `uv run miniverse run <scenario-or-file> --ticks <N> [--llm] [--verbose]`
+- `uv run miniverse list`
+- `uv run miniverse info <scenario>`
+
+Run tests with `uv run pytest` (or targeted subsets).
+
+## Scenario Authoring
+Scenarios are YAML-first for readability, with JSON still supported for compatibility. Use `ScenarioLoader`/`scenario_files` helpers rather than hand-rolled parsers. Keep scenario-defining content in files; avoid embedding scenario copy as hardcoded CLI print text.
+Use `metadata.runtime` in scenario YAML to wire optional scenario-local extensions (`rules.py`, `cognition.py`) instead of hardcoded CLI branches.
+
+## Logging Expectations
+CLI behavior should be consistent across all runs:
+
+- Deterministic default: final summary only.
+- Deterministic verbose: structured tick timeline.
+- LLM default: concise setup + pipeline/action progress.
+- LLM verbose: memories, planning, reflection, and LLM response summaries.
+- Debug flags (`DEBUG_*`) are for deep diagnostics and may be noisy.
+
+Do not introduce demo-only log tags or branches into general CLI paths.
 
 ## Coding Style & Naming Conventions
-Code targets Python 3.10+, leaning on type hints and Pydantic models; keep new APIs typed and validated. Prefer concise module-level docstrings and inline comments only where agent logic is subtle. Use snake_case for callables, PascalCase for classes, and UPPER_SNAKE_CASE for constants or log tags. Maintain four-space indentation, keep lines near 100 characters, and favor explicit imports over star patterns.
+Python 3.10+, typed APIs, Pydantic-first schema boundaries. Use snake_case for functions/modules, PascalCase for classes, UPPER_SNAKE_CASE for constants. Keep comments focused on non-obvious logic and preserve readable, low-noise output formatting.
 
 ## Testing Guidelines
-Unit tests lean on `pytest` and `pytest-asyncio`; mirror new features with async-aware fixtures whenever side effects cross ticks. Name files `test_<module>.py` and build fixtures that cover both deterministic and LLM-backed flows. When extending cognition or persistence, add assertions for logging tags and schema validation. Run the full suite before submitting and keep assertions in `tests/`, not examples.
+Use `pytest` + `pytest-asyncio`. Add/update tests when changing:
+- scenario loading/resolution
+- cognition/logging behavior
+- CLI output mode behavior
 
-## Commit & Pull Request Guidelines
-Write concise, imperative commit subjects ("Fix orchestrator error handling"), optionally prefixed with a scope such as `feat:` for new capabilities. Bundle related changes and document breaking API shifts in `CHANGELOG.md`. Pull requests should describe the scenario or subsystem touched, link issues from `ISSUES.md`, and cite `uv run` commands or logs that prove the behavior.
+Before finishing, run the relevant test subset and at least one real CLI run for the touched mode(s).
 
 ## Environment & Configuration Tips
-Copy `.env.example` to `.env` when experimenting with LLM cognition, and set `LLM_PROVIDER`, `LLM_MODEL`, and API keys before launching examples. Use `DEBUG_LLM=1`, `DEBUG_MEMORY=1`, or `MINIVERSE_VERBOSE=1` to surface prompts and memory traces. Keep secrets and run artifacts out of commits; leave them in `.env` or the gitignored `runs/` folder.
+For LLM runs, set `LLM_PROVIDER`, `LLM_MODEL`, and provider API keys. `UV_CACHE_DIR=.uv-cache` is optional and only controls where uv stores cache files (helpful to keep project-local cache and avoid global cache churn).

@@ -11,7 +11,6 @@ Authoritative instructions for working on the **Miniverse** codebase.
 1. **VISION.md** – The north star. What Miniverse should become. Read this first.
 2. **ROADMAP.md** – Phased implementation plan. What we're building and when.
 3. **This file (CLAUDE.md)** – Operational guidance for development.
-4. **ISSUES.md** – Known issues and immediate priorities.
 
 ---
 
@@ -176,7 +175,7 @@ uv run python examples/workshop/run.py --ticks 6
 
 1. Check VISION.md – does this align with where we're going?
 2. Check ROADMAP.md – which phase does this belong to?
-3. Check ISSUES.md – is there a related known issue?
+3. Check the GitHub issue tracker – is there a related known issue?
 
 ### While You Code
 
@@ -189,7 +188,7 @@ uv run python examples/workshop/run.py --ticks 6
 
 1. Run `UV_CACHE_DIR=.uv-cache uv run pytest`
 2. Verify examples still work
-3. Update ISSUES.md if you resolve something
+3. Update or close the related GitHub issue if you resolve something
 4. Update ROADMAP.md if you complete a deliverable
 
 ---
@@ -281,7 +280,7 @@ citation = Citation(
 
 - **Understanding the vision**: Read VISION.md
 - **Finding what to work on**: Read ROADMAP.md
-- **Known issues**: Read ISSUES.md
+- **Known issues**: Use the GitHub issue tracker
 - **Architecture questions**: Read `docs/architecture/`
 - **When in doubt**: Ask before implementing new patterns
 
@@ -297,9 +296,6 @@ ROADMAP.md         ← Implementation phases (how we get there)
     │
     ▼
 CLAUDE.md          ← Operational guidance (how to work)
-    │
-    ▼
-ISSUES.md          ← Known issues (what's broken/missing)
     │
     ▼
 docs/              ← Deep dives (architecture, usage, research)

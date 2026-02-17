@@ -15,6 +15,9 @@ Coordinates the simulation loop:
 
 import asyncio
 import os
+import re
+import shutil
+import textwrap
 from typing import Any, Callable, List, Dict, Optional
 from uuid import UUID, uuid4
 
@@ -44,6 +47,24 @@ from .cognition import (
 )
 from .cognition.cadence import PLANNER_LAST_TICK_KEY, REFLECTION_LAST_TICK_KEY
 from .cognition.planner import Plan, PlanStep
+
+
+# Log verbosity levels for orchestrator progress output.
+_LOG_MODE_LEVELS: Dict[str, int] = {
+    "none": 0,
+    "concise": 1,
+    "verbose": 2,
+}
+
+_SIDECAR_HISTORY_KEY = "__sidecar_history"
+_SIDECAR_WINDOW_TICKS = 3
+_SIDECAR_MAX_IN_WINDOW = 2
+_COMM_MEMORY_CAP_SIDE_CAR = 3
+
+
+def _env_enabled(name: str) -> bool:
+    """Return True only for explicit truthy env flag values."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # =============================
@@ -135,6 +156,7 @@ class Orchestrator:
         tick_listeners: Optional[
             List[Callable[[int, WorldState, WorldState, List[AgentAction]], None]]
         ] = None,
+        log_mode: str = "verbose",
     ):
         """Initialize orchestrator with all dependencies injected.
 
@@ -153,6 +175,10 @@ class Orchestrator:
             tick_listeners: Optional callables invoked after each tick for
                 additional analysis or logging. Each listener receives
                 (tick, previous_state, new_state, actions).
+            log_mode: Progress output verbosity. One of:
+                - "none": no tick-level logs (final result only)
+                - "concise": compact per-tick progress/action summaries
+                - "verbose": detailed step-by-step logs
         """
         self.current_state = world_state
         self.agents = agents
@@ -188,6 +214,14 @@ class Orchestrator:
         # Tick listeners are optional callbacks invoked after each tick completes.
         # They receive (tick, previous_state, new_state, actions) for analysis/logging.
         self.tick_listeners = tick_listeners or []
+
+        if log_mode not in _LOG_MODE_LEVELS:
+            raise ValueError(
+                f"Invalid log_mode '{log_mode}'. "
+                f"Expected one of: {', '.join(sorted(_LOG_MODE_LEVELS))}"
+            )
+        self.log_mode = log_mode
+        self._total_ticks = 0
 
         # Give simulation rules a chance to modify initial state (e.g., compute
         # derived metrics, initialize tracking structures). Not all rules need this.
@@ -225,16 +259,255 @@ class Orchestrator:
         Returns:
             Agent ID if found, None otherwise
         """
-        # Check if already an agent_id
-        if name_or_id in self.agents:
-            return name_or_id
+        def normalize(value: str) -> str:
+            return "".join(ch for ch in value.lower() if ch.isalnum())
 
-        # Search by display name
+        if not name_or_id:
+            return None
+        candidate = name_or_id.strip()
+
+        # Check if already an agent_id
+        if candidate in self.agents:
+            return candidate
+
+        normalized_candidate = normalize(candidate)
+
+        # Search by normalized id or display name.
         for agent_id, profile in self.agents.items():
-            if profile.name == name_or_id:
+            if normalize(agent_id) == normalized_candidate:
+                return agent_id
+            if normalize(profile.name) == normalized_candidate:
                 return agent_id
 
         return None
+
+    def _is_sidecar_mode_enabled(self) -> bool:
+        """Return True when scenario cognition mode allows sidecar communication."""
+        metadata = self.current_state.metadata or {}
+        runtime = metadata.get("runtime") if isinstance(metadata, dict) else None
+        if not isinstance(runtime, dict):
+            return False
+        cognition = runtime.get("cognition")
+        if not isinstance(cognition, dict):
+            return False
+        kwargs = cognition.get("kwargs")
+        if not isinstance(kwargs, dict):
+            return False
+        mode = str(kwargs.get("communication_mode", "")).strip().lower()
+        return mode == "sidecar"
+
+    @staticmethod
+    def _is_communication_memory_text(content: str) -> bool:
+        text = content.lower()
+        return " told " in text or text.startswith("i told ")
+
+    @classmethod
+    def _cap_communication_memories(
+        cls, memories: List[str], *, max_communication: int
+    ) -> List[str]:
+        """Keep memory context diverse so communication chatter does not dominate."""
+        if max_communication < 0:
+            return memories
+        communication_count = 0
+        balanced: List[str] = []
+        for memory in memories:
+            if cls._is_communication_memory_text(memory):
+                if communication_count >= max_communication:
+                    continue
+                communication_count += 1
+            balanced.append(memory)
+        return balanced
+
+    @staticmethod
+    def _normalize_sidecar_signature(recipient: str, message: str) -> str:
+        normalized_message = re.sub(r"\s+", " ", message.strip().lower())
+        return f"{recipient.strip().lower()}|{normalized_message}"
+
+    def _apply_sidecar_budget(
+        self,
+        *,
+        tick: int,
+        agent_id: str,
+        cognition: AgentCognition,
+        action: AgentAction,
+    ) -> None:
+        """Constrain sidecar usage to reduce repetitive coordination chatter."""
+        if not self._is_sidecar_mode_enabled():
+            return
+        if action.action_type == "communicate":
+            return
+        if not action.communication or not isinstance(action.communication, dict):
+            return
+
+        recipient = action.communication.get("to")
+        message_raw = action.communication.get("message") or action.communication.get("content")
+        message = str(message_raw or "").strip()
+        if not recipient or not message:
+            action.communication = None
+            return
+
+        # Sidecar is intended for execution follow-through, not replacing communication turns.
+        if action.action_type not in {"work", "repair"}:
+            action.communication = None
+            return
+
+        if len(message) > 220:
+            message = f"{message[:217].rstrip()}..."
+            action.communication["message"] = message
+
+        history = self._get_scratchpad_value(cognition, _SIDECAR_HISTORY_KEY, [])
+        if not isinstance(history, list):
+            history = []
+
+        window_start = tick - (_SIDECAR_WINDOW_TICKS - 1)
+        compact_history: List[Dict[str, Any]] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            item_tick = item.get("tick")
+            signature = item.get("signature")
+            if not isinstance(item_tick, int) or not isinstance(signature, str):
+                continue
+            if item_tick >= window_start:
+                compact_history.append({"tick": item_tick, "signature": signature})
+
+        signature = self._normalize_sidecar_signature(str(recipient), message)
+        if any(item["signature"] == signature for item in compact_history):
+            action.communication = None
+            self._set_scratchpad_value(cognition, _SIDECAR_HISTORY_KEY, compact_history)
+            return
+
+        if len(compact_history) >= _SIDECAR_MAX_IN_WINDOW:
+            action.communication = None
+            self._set_scratchpad_value(cognition, _SIDECAR_HISTORY_KEY, compact_history)
+            return
+
+        compact_history.append({"tick": tick, "signature": signature})
+        self._set_scratchpad_value(cognition, _SIDECAR_HISTORY_KEY, compact_history)
+
+    def _should_log(self, level: str) -> bool:
+        """Return whether current log mode includes the requested level."""
+        if level not in _LOG_MODE_LEVELS:
+            return False
+        return _LOG_MODE_LEVELS[self.log_mode] >= _LOG_MODE_LEVELS[level]
+
+    def _log(self, message: str, *, level: str = "concise") -> None:
+        """Print message if it meets the current log verbosity threshold."""
+        if self._should_log(level):
+            print(message, flush=True)
+
+    @staticmethod
+    def _wrap_for_log(
+        text: str,
+        *,
+        prefix: str = "",
+        continuation: Optional[str] = None,
+        width: Optional[int] = None,
+    ) -> str:
+        """Wrap long log lines for terminal readability without truncation."""
+        normalized = " ".join(str(text).split())
+        if not normalized:
+            return prefix.rstrip()
+        if width is None:
+            terminal_width = shutil.get_terminal_size(fallback=(112, 24)).columns
+            width = max(76, min(140, terminal_width - 2))
+        width = max(width, len(prefix) + 20)
+        return textwrap.fill(
+            normalized,
+            width=width,
+            initial_indent=prefix,
+            subsequent_indent=continuation if continuation is not None else " " * len(prefix),
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+
+    @staticmethod
+    def _format_stat_value_for_log(stat: Any) -> str:
+        """Format Stat-like objects for concise perception logging."""
+        if stat is None:
+            return "n/a"
+        value = getattr(stat, "value", stat)
+        unit = getattr(stat, "unit", "") or ""
+        if isinstance(value, float):
+            rendered = f"{value:.1f}" if abs(value) >= 10 else f"{value:.2f}"
+        else:
+            rendered = str(value)
+        return f"{rendered}{unit}" if unit else rendered
+
+    async def _seed_initial_memories(self) -> int:
+        """Optionally seed run-local memories from world metadata.
+
+        Supported metadata shape:
+        - world.metadata["initial_memories"] = {
+            "<agent_id>": [
+                {"content": "...", "memory_type": "observation", "importance": 6, ...},
+                "plain string memory"
+            ]
+          }
+        - or a flat list of dict entries containing `agent_id`.
+        """
+        payload = self.current_state.metadata.get("initial_memories")
+        if not payload:
+            return 0
+
+        seeded_count = 0
+        entries_by_agent: Dict[str, list[Any]] = {}
+
+        if isinstance(payload, dict):
+            for agent_id, entries in payload.items():
+                if isinstance(entries, list):
+                    entries_by_agent[agent_id] = entries
+        elif isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                agent_id = item.get("agent_id")
+                if not isinstance(agent_id, str):
+                    continue
+                entries_by_agent.setdefault(agent_id, []).append(item)
+
+        for agent_id, entries in entries_by_agent.items():
+            if agent_id not in self.agents:
+                continue
+            for entry in entries:
+                if isinstance(entry, str):
+                    content = entry.strip()
+                    memory_type = "observation"
+                    importance = 5
+                    tags: list[str] = []
+                    metadata: Dict[str, Any] = {}
+                    tick = 0
+                elif isinstance(entry, dict):
+                    content = str(entry.get("content", "")).strip()
+                    memory_type = str(entry.get("memory_type", "observation"))
+                    importance = int(entry.get("importance", 5))
+                    importance = max(1, min(10, importance))
+                    tags = entry.get("tags", [])
+                    if not isinstance(tags, list):
+                        tags = []
+                    metadata = entry.get("metadata", {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    tick = int(entry.get("tick", 0))
+                else:
+                    continue
+
+                if not content:
+                    continue
+
+                await self.memory.add_memory(
+                    run_id=self.run_id,
+                    agent_id=agent_id,
+                    tick=max(0, tick),
+                    memory_type=memory_type,
+                    content=content,
+                    importance=importance,
+                    tags=tags,
+                    metadata=metadata,
+                )
+                seeded_count += 1
+
+        return seeded_count
 
     def _preflight_prompt_templates(self) -> None:
         """Warn once per missing template before the tick loop starts.
@@ -254,11 +527,17 @@ class Orchestrator:
                 if getattr(planner_obj, "template", None) is None and (name is None or name == "plan") and library is DEFAULT_PROMPTS:
                     key = f"planner_default:{agent_id}"
                     if not self._prompt_warnings_emitted.get(key):
-                        print(f"  [Prompts] Agent '{agent_id}' planner using default template 'plan'.")
+                        self._log(
+                            f"  [Prompts] Agent '{agent_id}' planner using default template 'plan'.",
+                            level="verbose",
+                        )
                         self._prompt_warnings_emitted[key] = True
                 # Missing named template warning
                 if name and name not in library.templates and not self._prompt_warnings_emitted.get(f"planner_missing:{name}"):
-                    print(f"  [Prompts] Agent '{agent_id}' planner template '{name}' not found; using default 'plan'.")
+                    self._log(
+                        f"  [Prompts] Agent '{agent_id}' planner template '{name}' not found; using default 'plan'.",
+                        level="concise",
+                    )
                     self._prompt_warnings_emitted[f"planner_missing:{name}"] = True
 
             # Executor
@@ -269,11 +548,17 @@ class Orchestrator:
                 if getattr(exec_obj, "template", None) is None and (name is None or name in ("default", "execute_tick")) and library is DEFAULT_PROMPTS:
                     key = f"executor_default:{agent_id}"
                     if not self._prompt_warnings_emitted.get(key):
-                        print(f"  [Prompts] Agent '{agent_id}' executor using default template '{'default' if name in (None, 'default') else name}'.")
+                        self._log(
+                            f"  [Prompts] Agent '{agent_id}' executor using default template '{'default' if name in (None, 'default') else name}'.",
+                            level="verbose",
+                        )
                         self._prompt_warnings_emitted[key] = True
                 # Missing named template warning
                 if name and name not in library.templates and not self._prompt_warnings_emitted.get(f"executor_missing:{name}"):
-                    print(f"  [Prompts] Agent '{agent_id}' executor template '{name}' not found; using default 'default'.")
+                    self._log(
+                        f"  [Prompts] Agent '{agent_id}' executor template '{name}' not found; using default 'default'.",
+                        level="concise",
+                    )
                     self._prompt_warnings_emitted[f"executor_missing:{name}"] = True
 
             # Reflection
@@ -284,11 +569,17 @@ class Orchestrator:
                 if getattr(refl_obj, "template", None) is None and (name is None or name == "reflect_diary") and library is DEFAULT_PROMPTS:
                     key = f"reflection_default:{agent_id}"
                     if not self._prompt_warnings_emitted.get(key):
-                        print(f"  [Prompts] Agent '{agent_id}' reflection using default template 'reflect_diary'.")
+                        self._log(
+                            f"  [Prompts] Agent '{agent_id}' reflection using default template 'reflect_diary'.",
+                            level="verbose",
+                        )
                         self._prompt_warnings_emitted[key] = True
                 # Missing named template warning
                 if name and name not in library.templates and not self._prompt_warnings_emitted.get(f"reflection_missing:{name}"):
-                    print(f"  [Prompts] Agent '{agent_id}' reflection template '{name}' not found; using default 'reflect_diary'.")
+                    self._log(
+                        f"  [Prompts] Agent '{agent_id}' reflection template '{name}' not found; using default 'reflect_diary'.",
+                        level="concise",
+                    )
                     self._prompt_warnings_emitted[f"reflection_missing:{name}"] = True
 
     def _describe_world_update_mode(self) -> str:
@@ -342,27 +633,36 @@ class Orchestrator:
             # users to rewind simulations. All persistence operations tag data with run_id so
             # multiple simulation runs can coexist in the same backend.
             await self.persistence.save_state(self.run_id, 0, self.current_state)
+            seeded_memories = await self._seed_initial_memories()
+            if seeded_memories:
+                self._log(
+                    f"[Preflight] Seeded {seeded_memories} initial memory record(s).",
+                    level="concise",
+                )
 
-            print(f"Starting simulation run {self.run_id}")
-            print(f"Agents: {len(self.agents)}, Ticks: {num_ticks}\n")
+            self._total_ticks = num_ticks
+
+            self._log(f"Starting simulation run {self.run_id}", level="concise")
+            self._log(f"Agents: {len(self.agents)}, Ticks: {num_ticks}\n", level="concise")
 
             # Preflight: warn early if requested prompt templates are missing
             self._preflight_prompt_templates()
 
             # Preflight: report world update mode
-            print(self._describe_world_update_mode())
+            self._log(self._describe_world_update_mode(), level="concise")
 
             # Main simulation loop. Each tick is independent - if one tick fails, we propagate
             # the exception immediately rather than continuing with corrupted state.
             ticks_completed = 0
             stopped_early = False
             for tick in range(1, num_ticks + 1):
-                print(f"=== Tick {tick}/{num_ticks} ===")
+                if self._should_log("verbose"):
+                    self._log(f"=== Tick {tick}/{num_ticks} ===", level="verbose")
 
                 try:
                     await self._run_tick(tick)
                 except Exception as e:
-                    print(f"ERROR at tick {tick}: {e}")
+                    self._log(f"ERROR at tick {tick}: {e}", level="concise")
                     raise
 
                 ticks_completed = tick
@@ -371,8 +671,9 @@ class Orchestrator:
                     self.current_state, tick
                 ):
                     stopped_early = True
-                    print(
-                        f"\nSimulation stopped early at tick {tick} (signaled by simulation rules)."
+                    self._log(
+                        f"\nSimulation stopped early at tick {tick} (signaled by simulation rules).",
+                        level="concise",
                     )
                     break
 
@@ -384,9 +685,12 @@ class Orchestrator:
                 )
 
             if stopped_early:
-                print("\nSimulation finished early (simulation rules signaled stop).")
+                self._log(
+                    "\nSimulation finished early (simulation rules signaled stop).",
+                    level="concise",
+                )
             else:
-                print("\n✅ Simulation complete!")
+                self._log("\n✅ Simulation complete!", level="concise")
 
             return {"run_id": self.run_id, "final_state": self.current_state}
 
@@ -406,16 +710,32 @@ class Orchestrator:
         # to detect emergent patterns, compute metrics, or trigger custom events.
         previous_state = self.current_state
 
+        if self.log_mode == "concise":
+            total = self._total_ticks or "?"
+            self._log(
+                f"Tick {tick}/{total}: perception -> planning -> action -> world -> persistence",
+                level="concise",
+            )
+
         # 0. Apply deterministic physics FIRST (if simulation_rules provided).
         # Physics runs BEFORE agent actions to ensure agents perceive the consequences of
         # previous tick's physics. Example: resource consumption, environmental decay,
         # scheduled events. Physics is pure Python (fast, testable, deterministic).
         if self.simulation_rules:
-            print(colored(f"  {LOG_TAG_DETERMINISTIC} [Physics] Applying deterministic rules for tick {tick}...", Color.BLUE))
+            self._log(
+                colored(
+                    f"  {LOG_TAG_DETERMINISTIC} [Physics] Applying deterministic rules for tick {tick}...",
+                    Color.BLUE,
+                ),
+                level="verbose",
+            )
             self.current_state = self.simulation_rules.apply_tick(
                 self.current_state, tick
             )
-            print(colored(f"  {LOG_TAG_SUCCESS} [Physics] Physics applied", Color.GREEN))
+            self._log(
+                colored(f"  {LOG_TAG_SUCCESS} [Physics] Physics applied", Color.GREEN),
+                level="verbose",
+            )
 
         # 1. Gather agent actions in parallel. Each agent gets partial observability based on
         # their location and access rights. Running in parallel minimizes total LLM latency
@@ -436,7 +756,7 @@ class Orchestrator:
 
         # 4. Print human-readable summary for monitoring. Shows resource levels, agent actions,
         # and recent events. Helps users understand simulation progress without reading logs.
-        self._print_tick_summary(tick, actions, new_state)
+        self._print_tick_summary(tick, actions, new_state, previous_state)
 
         # 5. Update current state to serve as baseline for next tick. This happens AFTER
         # persistence to avoid race conditions between tick listeners and the next tick.
@@ -451,7 +771,7 @@ class Orchestrator:
                 try:
                     listener(tick, previous_state, new_state, actions)
                 except Exception as exc:  # pragma: no cover - diagnostic hook
-                    print(f"  [Analysis] Listener failed: {exc}")
+                    self._log(f"  [Analysis] Listener failed: {exc}", level="concise")
 
     async def _gather_agent_actions(self, tick: int) -> List[AgentAction]:
         """Get all agent actions in parallel.
@@ -466,24 +786,52 @@ class Orchestrator:
         # independent (no coordination) so we run all agents concurrently to minimize total
         # LLM latency. With N agents and ~2s LLM latency, parallel execution takes ~2s total
         # vs ~2N seconds sequential.
-        tasks = []
-        for agent_id, profile in self.agents.items():
-            task = self._get_single_agent_action(agent_id, tick)
-            tasks.append((agent_id, task))
+        task_map: Dict[str, asyncio.Task[AgentAction]] = {}
+        for agent_id in self.agents:
+            task_map[agent_id] = asyncio.create_task(
+                self._get_single_agent_action(agent_id, tick)
+            )
 
-        # Execute all agent queries in parallel. return_exceptions=True ensures one agent's
-        # failure doesn't crash the entire tick - we handle failures individually below.
-        results = await asyncio.gather(
-            *[task for _, task in tasks], return_exceptions=True
-        )
+        # For verbose LLM runs, emit intra-tick progress while waiting on agent decisions.
+        # This prevents the appearance of "hanging" when first-tick LLM calls are slow.
+        if (
+            self._should_log("verbose")
+            and self.llm_provider
+            and self.llm_model
+            and task_map
+        ):
+            pending: set[asyncio.Task[AgentAction]] = set(task_map.values())
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            progress_interval_seconds = 10
+
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    timeout=progress_interval_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if pending and not done:
+                    elapsed = int(loop.time() - started)
+                    total = len(task_map)
+                    waiting = len(pending)
+                    completed = total - waiting
+                    self._log(
+                        f"  [progress] Tick {tick}: waiting on {waiting}/{total} "
+                        f"agent decisions ({elapsed}s elapsed, {completed} complete)",
+                        level="verbose",
+                    )
+        else:
+            await asyncio.wait(set(task_map.values()))
 
         # Fail-fast: if any agent action failed, raise an informative error with all failures.
         valid_actions: List[AgentAction] = []
         failures: Dict[str, Exception] = {}
-        for i, result in enumerate(results):
-            agent_id = tasks[i][0]
-            if isinstance(result, Exception):
-                failures[agent_id] = result
+        for agent_id, task in task_map.items():
+            try:
+                result = task.result()
+            except Exception as exc:
+                failures[agent_id] = exc
             else:
                 valid_actions.append(result)
 
@@ -509,7 +857,13 @@ class Orchestrator:
         """
         agent_name = self.agents[agent_id].name
         cognition = self.agent_cognition[agent_id]
-        print(colored(f"  {LOG_TAG_DETERMINISTIC} [{agent_name}] Building perception...", Color.BLUE))
+        self._log(
+            colored(
+                f"  {LOG_TAG_DETERMINISTIC} [{agent_name}] Building perception...",
+                Color.BLUE,
+            ),
+            level="verbose",
+        )
 
         # A2: Do not read messages from actions. Messages are sourced from memories.
 
@@ -534,6 +888,11 @@ class Orchestrator:
             recent_memory_strings = await self.memory.get_recent_memories(
                 self.run_id, agent_id, limit=10
             )
+        if self._is_sidecar_mode_enabled() and recent_memory_strings:
+            recent_memory_strings = self._cap_communication_memories(
+                recent_memory_strings,
+                max_communication=_COMM_MEMORY_CAP_SIDE_CAR,
+            )
 
         # Also get structured memory objects for message extraction and debug output.
         # This goes to persistence directly since we need the full AgentMemory objects.
@@ -542,7 +901,7 @@ class Orchestrator:
         )
 
         # Get debug flag once at top of function
-        debug_memory = os.getenv("DEBUG_MEMORY")
+        debug_memory = _env_enabled("DEBUG_MEMORY")
 
         # DEBUG_MEMORY: Show what memories agent retrieved and the query used
         if debug_memory:
@@ -557,6 +916,43 @@ class Orchestrator:
                 print(colored(f"    {i}. {mem_preview}", Color.CYAN))
             if len(recent_memory_strings) > 5:
                 print(colored(f"    ... and {len(recent_memory_strings) - 5} more", Color.CYAN))
+        elif _env_enabled("MINIVERSE_VERBOSE") and self.llm_provider and self.llm_model:
+            if memory_query:
+                query_preview = (
+                    memory_query[:80] + "..."
+                    if len(memory_query) > 80
+                    else memory_query
+                )
+                self._log(
+                    colored(
+                        self._wrap_for_log(
+                            f"[Memory] {agent_name}: retrieved {len(recent_memory_strings)} "
+                            f"memory item(s) for query '{query_preview}'",
+                            prefix="    ",
+                            continuation="      ",
+                        ),
+                        Color.CYAN,
+                    ),
+                    level="verbose",
+                )
+            else:
+                if recent_memory_strings:
+                    self._log(
+                        colored(
+                            f"    [Memory] {agent_name}: retrieved {len(recent_memory_strings)} "
+                            "recent memory item(s)",
+                            Color.CYAN,
+                        ),
+                        level="verbose",
+                    )
+                else:
+                    self._log(
+                        colored(
+                            f"    [Memory] {agent_name}: no prior memories yet (starting fresh)",
+                            Color.CYAN,
+                        ),
+                        level="verbose",
+                    )
 
         # Build direct messages for this agent from recent memories (recipient entries only)
         recent_messages: List[Dict[str, str]] = []
@@ -589,8 +985,54 @@ class Orchestrator:
                     f"SimulationRules.customize_perception raised an error for agent {agent_id}"
                 ) from exc
 
+        if _env_enabled("MINIVERSE_VERBOSE") and self.llm_provider and self.llm_model:
+            clock = self._format_stat_value_for_log(
+                perception.environment_snapshot.get("shift_time_local")
+            )
+            remaining = self._format_stat_value_for_log(
+                perception.environment_snapshot.get("shift_minutes_remaining")
+            )
+            phase = self._format_stat_value_for_log(
+                perception.environment_snapshot.get("shift_phase")
+            )
+            backlog_visible = self._format_stat_value_for_log(
+                perception.visible_resources.get("task_backlog")
+            )
+            arrived_tick = self._format_stat_value_for_log(
+                perception.visible_resources.get("tasks_arrived_tick")
+            )
+            completed_tick = self._format_stat_value_for_log(
+                perception.visible_resources.get("tasks_completed_tick")
+            )
+            execution_capacity = self._format_stat_value_for_log(
+                perception.visible_resources.get("execution_capacity")
+            )
+            energy_now = self._format_stat_value_for_log(
+                perception.personal_attributes.get("energy")
+            )
+            stress_now = self._format_stat_value_for_log(
+                perception.personal_attributes.get("stress")
+            )
+
+            self._log(
+                colored(
+                    self._wrap_for_log(
+                        (
+                            f"[Perception] {agent_name}: time={clock}, remaining={remaining}, "
+                            f"phase={phase}, backlog={backlog_visible}, arrived={arrived_tick}, "
+                            f"completed={completed_tick}, exec_capacity={execution_capacity}, "
+                            f"energy={energy_now}, stress={stress_now}"
+                        ),
+                        prefix="    ",
+                        continuation="      ",
+                    ),
+                    Color.CYAN,
+                ),
+                level="verbose",
+            )
+
         # DEBUG_PERCEPTION: Log what agent perceives (parallel to DEBUG_LLM)
-        if os.getenv("DEBUG_PERCEPTION"):
+        if _env_enabled("DEBUG_PERCEPTION"):
             print(f"\n[DEBUG_PERCEPTION] {agent_name} (tick {tick})")
             print(f"  Recent memories ({len(recent_memory_strings)}):")
             for i, mem in enumerate(recent_memory_strings[:5], 1):  # Show first 5
@@ -660,6 +1102,31 @@ class Orchestrator:
             agent_id, cognition, planning_context, tick
         )
 
+        if _env_enabled("MINIVERSE_VERBOSE") and self.llm_provider and self.llm_model:
+            if plan.steps:
+                current_step = plan.steps[min(plan_index, len(plan.steps) - 1)]
+                step_preview = (
+                    current_step.description[:100] + "..."
+                    if len(current_step.description) > 100
+                    else current_step.description
+                )
+                self._log(
+                    colored(
+                        self._wrap_for_log(
+                            f"[Plan] {agent_name}: step {plan_index + 1}/{len(plan.steps)} -> {step_preview}",
+                            prefix="    ",
+                            continuation="      ",
+                        ),
+                        Color.CYAN,
+                    ),
+                    level="verbose",
+                )
+            else:
+                self._log(
+                    colored(f"    [Plan] {agent_name}: no active plan", Color.CYAN),
+                    level="verbose",
+                )
+
         # Summarize updated plan state for execution context. Executor needs to see full
         # plan to coordinate actions with long-term goals.
         plan_state = self._plan_state_summary(plan, plan_index)
@@ -696,7 +1163,13 @@ class Orchestrator:
                 uses_llm = False
 
         exec_tag = LOG_TAG_LLM if uses_llm else LOG_TAG_DETERMINISTIC
-        print(colored(f"  {exec_tag} [{agent_name}] Choosing action via executor...", Color.YELLOW))
+        self._log(
+            colored(
+                f"  {exec_tag} [{agent_name}] Choosing action via executor...",
+                Color.YELLOW,
+            ),
+            level="verbose",
+        )
         action = await cognition.executor.choose_action(
             agent_id,
             perception,
@@ -706,22 +1179,66 @@ class Orchestrator:
             context=context,
         )
 
-        # Show action details if verbose mode enabled
-        if os.getenv("MINIVERSE_VERBOSE"):
-            msg_preview = ""
-            if action.communication and action.communication.get("message"):
-                msg = action.communication["message"][:60]
-                msg_preview = f'\n    Message: "{msg}..."' if len(action.communication["message"]) > 60 else f'\n    Message: "{msg}"'
-            print(colored(f"    Reasoning: {action.reasoning[:80]}...", Color.CYAN))
-            if msg_preview:
-                print(colored(msg_preview, Color.CYAN))
-
-        print(colored(f"  {LOG_TAG_SUCCESS} [{agent_name}] Got action: {action.action_type}", Color.GREEN))
-
         # Ensure agent_id matches the requesting agent. LLM may hallucinate wrong agent_id
         # or executor may use templates that don't populate it correctly. Overwriting here
         # prevents actions from being misattributed.
         action.agent_id = agent_id
+
+        # Normalize communication recipients/targets to canonical agent_ids when possible.
+        if action.communication and isinstance(action.communication, dict):
+            raw_to = action.communication.get("to")
+            if isinstance(raw_to, str):
+                resolved_to = self._resolve_agent_id(raw_to)
+                if resolved_to:
+                    action.communication["to"] = resolved_to
+
+        if action.action_type == "communicate" and isinstance(action.target, str):
+            resolved_target = self._resolve_agent_id(action.target)
+            if resolved_target:
+                action.target = resolved_target
+
+        # Apply sidecar budgeting after recipient normalization to avoid duplicate chatter.
+        self._apply_sidecar_budget(
+            tick=tick,
+            agent_id=agent_id,
+            cognition=cognition,
+            action=action,
+        )
+
+        # Show action details if verbose mode enabled
+        if _env_enabled("MINIVERSE_VERBOSE"):
+            self._log(
+                colored(
+                    self._wrap_for_log(
+                        action.reasoning or "",
+                        prefix="    Reasoning: ",
+                        continuation="      ",
+                    ),
+                    Color.CYAN,
+                ),
+                level="verbose",
+            )
+            if action.communication and action.communication.get("message"):
+                message_text = str(action.communication.get("message") or "")
+                self._log(
+                    colored(
+                        self._wrap_for_log(
+                            f"\"{message_text}\"",
+                            prefix="    Message: ",
+                            continuation="      ",
+                        ),
+                        Color.CYAN,
+                    ),
+                    level="verbose",
+                )
+
+        self._log(
+            colored(
+                f"  {LOG_TAG_SUCCESS} [{agent_name}] Got action: {action.action_type}",
+                Color.GREEN,
+            ),
+            level="verbose",
+        )
 
         # Advance to next plan step after action executes. If plan is exhausted, wrap around
         # to step 0 (plans loop until planner refreshes). This keeps agents active rather
@@ -759,7 +1276,10 @@ class Orchestrator:
                 and self.llm_model
             )
         )
-        print(f"  [{'LLM' if will_use_llm else '•'}] [World Engine] Processing {len(actions)} actions...")
+        self._log(
+            f"  [{'LLM' if will_use_llm else '•'}] [World Engine] Processing {len(actions)} actions...",
+            level="verbose",
+        )
         mode = self.world_update_mode
         rules = self.simulation_rules
 
@@ -797,7 +1317,7 @@ class Orchestrator:
                 )
             except Exception as exc:
                 raise WorldEngineValidationError(tick=tick, underlying=exc)
-            print(f"  [World Engine] ✓ World state updated")
+            self._log("  [World Engine] ✓ World state updated", level="verbose")
             return new_state
 
         # auto mode
@@ -817,7 +1337,7 @@ class Orchestrator:
                 )
             except Exception as exc:
                 raise WorldEngineValidationError(tick=tick, underlying=exc)
-            print(f"  [World Engine] ✓ World state updated")
+            self._log("  [World Engine] ✓ World state updated", level="verbose")
             return new_state
         # No LLM configured and no rules processor: basic deterministic
         return self._apply_deterministic_world_update(tick, actions)
@@ -832,7 +1352,7 @@ class Orchestrator:
             state: New world state
             actions: Agent actions this tick
         """
-        print(f"  [Persistence] Persisting tick {tick}...")
+        self._log(f"  [Persistence] Persisting tick {tick}...", level="verbose")
         await self.persistence.save_state(self.run_id, tick, state)
 
         # A4: Actions should not persist full communication content. Keep only minimal reference.
@@ -849,7 +1369,7 @@ class Orchestrator:
 
         await self.persistence.save_actions(self.run_id, tick, sanitized_actions)
         await self._update_memories(tick, actions, state)
-        print(f"  [Persistence] ✓ Tick {tick} persisted")
+        self._log(f"  [Persistence] ✓ Tick {tick} persisted", level="verbose")
 
     async def _update_memories(
         self, tick: int, actions: List[AgentAction], state: WorldState
@@ -861,8 +1381,7 @@ class Orchestrator:
             actions: Agent actions this tick
             state: New world state
         """
-        import os
-        debug_memory = os.getenv("DEBUG_MEMORY")
+        debug_memory = _env_enabled("DEBUG_MEMORY")
 
         if debug_memory:
             print(colored(f"\n  [DEBUG_MEMORY] Tick {tick} - Creating memories...", Color.CYAN))
@@ -888,53 +1407,61 @@ class Orchestrator:
             )
             new_memories.setdefault(action.agent_id, []).append(memory)
 
-            # Store communications as memories FOR BOTH SENDER AND RECIPIENT
+            # Store communication memories.
             if action.communication:
                 recipient = action.communication.get("to", "unknown")
                 message = action.communication.get("message") or action.communication.get("content", "")
-
-                # Sender memory: "I told X: message"
-                sender_memory = await self.memory.add_memory(
-                    run_id=self.run_id,
-                    agent_id=action.agent_id,
-                    tick=tick,
-                    memory_type="communication",
-                    content=f"I told {recipient}: {message}",
-                    importance=6,
-                    tags=["communication", f"to:{recipient}"],
-                    metadata={
-                        "message": message,
-                        "recipient": recipient,
-                        "action_type": action.action_type,
-                        "role": "sender",
-                    },
-                )
-                new_memories.setdefault(action.agent_id, []).append(sender_memory)
+                recipient_id = self._resolve_agent_id(recipient)
+                sender_name = self.agents[action.agent_id].name
+                msg_preview = message[:60] + "..." if len(message) > 60 else message
 
                 if debug_memory:
-                    sender_name = self.agents[action.agent_id].name
-                    msg_preview = message[:60] + "..." if len(message) > 60 else message
                     print(colored(f"    💬 {sender_name} → {recipient}: \"{msg_preview}\"", Color.CYAN))
-                    print(colored(f"       Sender memory stored: \"I told {recipient}: ...\"", Color.CYAN))
 
-                # RECIPIENT memory: "X told me: message"
-                # This is the CRITICAL fix for information diffusion!
-                # Recipients need to remember messages they received.
-
-                # Map recipient name to agent_id (LLMs use names like "Ayesha Khan",
-                # but our agent dict has keys like "ayesha")
-                recipient_id = self._resolve_agent_id(recipient)
+                # In sidecar mode, non-communicate actions can attach short messages.
+                # Storing sender+recipient communication memories for every sidecar
+                # quickly floods retrieval with coordination chatter. For sidecar payloads,
+                # keep recipient memory only (enough for information diffusion).
+                sidecar_payload = (
+                    self._is_sidecar_mode_enabled() and action.action_type != "communicate"
+                )
+                store_sender_memory = not sidecar_payload
+                if sidecar_payload and (not recipient_id or recipient_id == "unknown"):
+                    # Fall back to sender-only memory if we cannot resolve recipient.
+                    store_sender_memory = True
+                if store_sender_memory:
+                    sender_memory = await self.memory.add_memory(
+                        run_id=self.run_id,
+                        agent_id=action.agent_id,
+                        tick=tick,
+                        memory_type="communication",
+                        content=f"I told {recipient}: {message}",
+                        importance=6,
+                        tags=["communication", f"to:{recipient}"],
+                        metadata={
+                            "message": message,
+                            "recipient": recipient,
+                            "action_type": action.action_type,
+                            "role": "sender",
+                        },
+                    )
+                    new_memories.setdefault(action.agent_id, []).append(sender_memory)
+                    if debug_memory:
+                        print(colored(f"       Sender memory stored: \"I told {recipient}: ...\"", Color.CYAN))
 
                 if recipient_id and recipient_id != "unknown":
-                    sender_name = self.agents[action.agent_id].name
                     recipient_memory = await self.memory.add_memory(
                         run_id=self.run_id,
                         agent_id=recipient_id,  # Use resolved agent_id, not raw name
                         tick=tick,
                         memory_type="communication",
                         content=f"{sender_name} told me: {message}",
-                        importance=7,  # Slightly higher - receiving information is important
-                        tags=["communication", f"from:{action.agent_id}"],
+                        importance=7 if store_sender_memory else 5,
+                        tags=[
+                            "communication",
+                            f"from:{action.agent_id}",
+                            "sidecar" if not store_sender_memory else "direct",
+                        ],
                         metadata={
                             "message": message,
                             "sender": action.agent_id,
@@ -947,7 +1474,12 @@ class Orchestrator:
 
                     if debug_memory:
                         recipient_name = self.agents[recipient_id].name
-                        print(colored(f"       Recipient memory stored: \"{recipient_name} received: ...\"", Color.CYAN))
+                        memory_note = (
+                            "Recipient memory stored"
+                            if store_sender_memory
+                            else "Sidecar recipient memory stored"
+                        )
+                        print(colored(f"       {memory_note}: \"{recipient_name} received: ...\"", Color.CYAN))
 
         # Store events as observations for affected agents
         for event in state.recent_events:
@@ -1210,6 +1742,28 @@ class Orchestrator:
                 context=reflection_context,
             )
 
+            if _env_enabled("MINIVERSE_VERBOSE") and self.llm_provider and self.llm_model and reflections:
+                agent_name = self.agents[agent_id].name
+                self._log(
+                    colored(
+                        f"    [Reflection] {agent_name}: {len(reflections)} reflection(s)",
+                        Color.CYAN,
+                    ),
+                    level="verbose",
+                )
+                for reflection in reflections:
+                    self._log(
+                        colored(
+                            self._wrap_for_log(
+                                reflection.content,
+                                prefix=f"      - ({reflection.importance}/10) ",
+                                continuation="        ",
+                            ),
+                            Color.CYAN,
+                        ),
+                        level="verbose",
+                    )
+
             # Record reflection tick to prevent double-reflection same tick
             self._set_scratchpad_value(cognition, REFLECTION_LAST_TICK_KEY, tick)
 
@@ -1286,7 +1840,11 @@ class Orchestrator:
         return new_state
 
     def _print_tick_summary(
-        self, tick: int, actions: List[AgentAction], state: WorldState
+        self,
+        tick: int,
+        actions: List[AgentAction],
+        state: WorldState,
+        previous_state: Optional[WorldState] = None,
     ) -> None:
         """Print human-readable tick summary.
 
@@ -1295,16 +1853,120 @@ class Orchestrator:
             actions: Agent actions this tick
             state: New world state
         """
+        if self.log_mode == "none":
+            return
+
         # Print resource levels
         resource_summary = (
             self.simulation_rules.format_resource_summary(state)
             if self.simulation_rules
             else format_resources_generic(state)
         )
-        if resource_summary:
-            print(f"  Resources: {resource_summary}")
 
-        # Print agent actions (full details)
+        # Optional shift clock summary (if scenario publishes these environment metrics).
+        shift_time = state.environment.metrics.get("shift_time_local")
+        shift_remaining = state.environment.metrics.get("shift_minutes_remaining")
+        shift_phase = state.environment.metrics.get("shift_phase")
+        clock_summary = None
+        if shift_time or shift_remaining or shift_phase:
+            time_value = self._format_stat_value_for_log(shift_time) if shift_time else "n/a"
+            remaining_value = (
+                self._format_stat_value_for_log(shift_remaining)
+                if shift_remaining
+                else "n/a"
+            )
+            phase_value = self._format_stat_value_for_log(shift_phase) if shift_phase else "n/a"
+            clock_summary = f"Clock: {time_value} | Remaining: {remaining_value} | Phase: {phase_value}"
+
+        # Optional task-flow interpretation block (if metrics are published).
+        arrived_tick = state.resources.metrics.get("tasks_arrived_tick")
+        completed_tick = state.resources.metrics.get("tasks_completed_tick")
+        net_change_tick = state.resources.metrics.get("task_net_change_tick")
+        task_flow_summary = None
+        if arrived_tick or completed_tick or net_change_tick:
+            arrived_value = int(arrived_tick.value) if arrived_tick else 0
+            completed_value = int(completed_tick.value) if completed_tick else 0
+            net_value = int(net_change_tick.value) if net_change_tick else (arrived_value - completed_value)
+            sign = "+" if net_value >= 0 else ""
+            task_flow_summary = (
+                f"Task flow: arrived={arrived_value}, completed={completed_value}, "
+                f"net_change={sign}{net_value}"
+            )
+
+        backlog_delta_summary = None
+        current_backlog_stat = state.resources.metrics.get("task_backlog")
+        previous_backlog_stat = (
+            previous_state.resources.metrics.get("task_backlog")
+            if previous_state is not None
+            else None
+        )
+        if current_backlog_stat is not None and previous_backlog_stat is not None:
+            current_backlog = int(current_backlog_stat.value)
+            previous_backlog = int(previous_backlog_stat.value)
+            delta = current_backlog - previous_backlog
+            sign = "+" if delta >= 0 else ""
+            backlog_delta_summary = (
+                f"Pending Tasks: {previous_backlog} -> {current_backlog} (Δ {sign}{delta})"
+            )
+
+        if self.log_mode == "concise":
+            if clock_summary:
+                self._log(f"  {clock_summary}", level="concise")
+            if backlog_delta_summary:
+                self._log(f"  {backlog_delta_summary}", level="concise")
+            if task_flow_summary:
+                self._log(f"  {task_flow_summary}", level="concise")
+            if resource_summary:
+                self._log(f"  Resources: {resource_summary}", level="concise")
+
+            directed_messages = 0
+            for action in actions:
+                if (
+                    action.communication
+                    and isinstance(action.communication, dict)
+                    and action.communication.get("to")
+                ):
+                    directed_messages += 1
+
+            if actions:
+                self._log("  Actions:", level="concise")
+                for action in actions:
+                    agent = self.agents[action.agent_id]
+                    target = f" target={action.target}" if action.target is not None else ""
+                    comm_to = None
+                    if action.communication and isinstance(action.communication, dict):
+                        comm_to = action.communication.get("to")
+                    comm = f" to={comm_to}" if comm_to else ""
+                    reason = action.reasoning or ""
+                    reason_preview = (
+                        reason[:100] + "..." if len(reason) > 100 else reason
+                    )
+                    self._log(
+                        f"    - {agent.name}: {action.action_type}{target}{comm}"
+                        f" | {reason_preview}",
+                        level="concise",
+                    )
+
+            self._log(
+                f"  Coordination signals: directed messages={directed_messages}",
+                level="concise",
+            )
+            self._log("", level="concise")
+            return
+
+        # Verbose mode prints full details.
+        if clock_summary:
+            self._log(f"  {clock_summary}", level="verbose")
+        if backlog_delta_summary:
+            self._log(f"  {backlog_delta_summary}", level="verbose")
+        if task_flow_summary:
+            self._log(f"  {task_flow_summary}", level="verbose")
+        if resource_summary:
+            self._log(f"  Resources: {resource_summary}", level="verbose")
+
+        if actions:
+            self._log("  Actions:", level="verbose")
+
         for action in actions:
             agent = self.agents[action.agent_id]
             reasoning_text = action.reasoning if action.reasoning is not None else ""
@@ -1314,13 +1976,24 @@ class Orchestrator:
             if action.communication and isinstance(action.communication, dict):
                 comm_to = action.communication.get("to")
             comm_str = f" comm.to={comm_to}" if comm_to else ""
-            print(
-                f"  {agent.name}: {action.action_type}{target_str}{params_str}{comm_str} - {reasoning_text}"
+            prefix = (
+                f"    - {agent.name}: {action.action_type}{target_str}{params_str}{comm_str} - "
+            )
+            wrapped = self._wrap_for_log(
+                reasoning_text,
+                prefix=prefix,
+                continuation="      ",
+            )
+            self._log(
+                wrapped,
+                level="verbose",
             )
 
-        # Print events
         for event in state.recent_events:
             if event.tick == tick:
-                print(f"  EVENT (severity {event.severity}): {event.description}")
+                self._log(
+                    f"  EVENT (severity {event.severity}): {event.description}",
+                    level="verbose",
+                )
 
-        print()  # Blank line for readability
+        self._log("", level="verbose")

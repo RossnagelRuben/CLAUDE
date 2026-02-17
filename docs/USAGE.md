@@ -6,7 +6,7 @@ This guide walks through the workflow for authoring a new simulation using the M
 
 ## 1. Define the Scenario
 
-Create a JSON file describing the initial world:
+Create a YAML (or JSON) file describing the initial world:
 
 - **Agents** – profiles (identity, skills, goals, relationships) plus status blocks (location, attributes, tags).
 - **Resources** – shared metrics such as power, backlog, or budget (via `ResourceState`).
@@ -16,12 +16,25 @@ Create a JSON file describing the initial world:
   - Tier 2: `environment_grid` (width/height + tiles) for spatial worlds.
 - **Events** – optional initial events.
 
-Use `ScenarioLoader` to parse the file into `WorldState` and `AgentProfile` objects (`miniverse/scenario.py`). The workshop example (`examples/workshop/scenario.json`) shows a Tier‑1 setup.
+Use `ScenarioLoader` to parse the file into `WorldState` and `AgentProfile` objects (`miniverse/scenario.py`). The workshop example (`examples/workshop/scenario.yaml`) shows a Tier-1 setup.
 
 ```python
 loader = ScenarioLoader(scenarios_dir=Path("examples/workshop"))
 world_state, profiles = loader.load("scenario")
 ```
+
+Optional: seed starter memories in scenario metadata so agents begin with prior context:
+
+```yaml
+metadata:
+  initial_memories:
+    lead:
+      - content: "Previous shift reported intermittent recycler instability."
+        memory_type: observation
+        importance: 7
+```
+
+Miniverse persists these at tick `0` before the first decision tick.
 
 ---
 
@@ -34,6 +47,8 @@ Subclass `SimulationRules` to encode domain physics:
 - Optional hooks: `on_simulation_start`, `on_simulation_end`, `format_resource_summary`.
 
 These rules run before cognition each tick and ensure predictable system dynamics.
+This logic currently lives in Python (`rules.py`), not YAML, because update
+formulas and action-processing are executable behavior rather than static state.
 Provide optional stochasticity by passing a `random.Random` instance (or omit it
 for strict determinism):
 
@@ -61,6 +76,24 @@ class WorkshopRules(SimulationRules):
 
 For environments, use the helper module (`miniverse/environment/helpers.py`) to manage capacities (`GraphOccupancy`) or compute paths (`shortest_path`, `grid_shortest_path`).
 
+Runtime wiring for scenario-local extensions can be declared in scenario YAML:
+
+```yaml
+metadata:
+  runtime:
+    rules:
+      module: rules.py
+      class: WorkshopRules
+      kwargs:
+        tick_minutes: 30
+    cognition:
+      module: cognition.py
+      builder: build_cognition
+```
+
+`kwargs` are passed into the scenario rule constructor so you can tune behavior
+from YAML without hardcoding values in CLI code.
+
 ### Ticks, Time, and Planning Cadence
 
 - Each iteration of the orchestrator increments `WorldState.tick`. Scenarios decide how that maps to real time (minute, hour, daily loop, etc.)—the library does not assume a day-length tick.
@@ -79,10 +112,20 @@ Each agent has an `AgentCognition` bundle containing:
 - `Scratchpad` – shared working memory (plan state, open tasks, custom flags).
 - `PromptLibrary` (optional) – named templates for plan/execute/reflect stages.
 
+Terminology:
+- **Cognition policy** means "how agents choose actions."
+- Cognition policy can be deterministic (rule-based) or LLM-backed.
+- This is separate from **world policy** in `SimulationRules`, which handles deterministic physics.
+
 Miniverse ships two sets of implementations:
 
 1. **Deterministic (example)** – see `examples/workshop/run.py` (`DeterministicPlanner`, `DeterministicExecutor`, `DeterministicReflection`).
 2. **LLM-backed** – `LLMPlanner` and `LLMReflectionEngine` in `miniverse/cognition/llm.py`. They render templates, call the LLM via `call_llm_with_retries`, and parse structured JSON responses.
+
+Why deterministic planner/executor classes can live in `cognition.py`:
+- Deterministic runs still require per-agent actions each tick.
+- Those actions come from a deterministic cognition policy (not from `SimulationRules` directly).
+- `SimulationRules` then applies/validates/processes those actions in the world.
 
 ### Prompt templates: explicit usage
 

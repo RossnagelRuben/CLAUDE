@@ -1,0 +1,168 @@
+name: Operations Workshop
+description: Three-person maintenance crew coordinating tasks across the workshop
+  floor.
+initial_timestamp: '2160-03-21T08:00:00'
+metadata:
+  runtime:
+    rules:
+      module: rules.py
+      class: WorkshopRules
+      kwargs:
+        task_arrival_chance: 0.35
+        max_new_tasks: 2
+        tick_minutes: 30
+        shift_duration_minutes: 300
+    cognition:
+      module: cognition.py
+      builder: build_cognition
+      kwargs:
+        communication_mode: sidecar
+  demo:
+    id: workshop
+    persona_set: Tensioned Shift Personas
+    persona_intent: Subtle interpersonal tension and differing work styles under moderate
+      backlog pressure. No one is malicious; the friction comes from pace, certainty
+      thresholds, and communication style.
+    scene: 08:00 shift handoff at the operations workshop. There are 8 pending tickets
+      and only a short window to stabilize systems before leadership review.
+environment:
+  metrics:
+    temperature_c:
+      value: 22.0
+      unit: °C
+      label: Ambient Temperature
+    floor_status:
+      value: normal
+      label: Floor Status
+resources:
+  metrics:
+    task_backlog:
+      value: 8
+      label: Pending Tasks
+environment_graph:
+  nodes:
+    ops:
+      name: Operations Floor
+      capacity: 2
+    workbench:
+      name: Workbench
+      capacity: 1
+    inventory:
+      name: Inventory Bay
+      capacity: 1
+  adjacency:
+    ops:
+    - workbench
+    - inventory
+    workbench:
+    - ops
+    inventory:
+    - ops
+agents:
+- profile:
+    agent_id: lead
+    name: Morgan Reyes
+    age: 33
+    background: Floor lead accountable for throughput and safety in a high-visibility
+      shift window.
+    role: lead
+    personality: decisive, high-tempo, intolerant of drift
+    skills:
+      coordination: expert
+      diagnostics: advanced
+    goals:
+    - Reduce backlog quickly before handoff
+    - Keep team synchronized despite disagreements
+    relationships:
+      tech: Worries the technician over-checks before acting
+      analyst: Appreciates analytics but pushes for faster calls
+  status:
+    agent_id: lead
+    display_name: Morgan Reyes
+    role: lead
+    location: ops
+    activity: null
+    attributes:
+      energy:
+        value: 72
+        unit: '%'
+        label: Energy
+      stress:
+        value: 52
+        unit: '%'
+        label: Stress
+    metadata:
+      persona: Urgent coordinator under pressure
+      tension_note: Pushes for immediate progress and gets impatient when others ask
+        for more validation.
+- profile:
+    agent_id: tech
+    name: Lin Zhao
+    age: 29
+    background: Maintenance technician focused on reliability and avoiding repeat
+      failures.
+    role: technician
+    personality: steady, methodical, comfort-seeking under load
+    skills:
+      repairs: expert
+      analysis: intermediate
+    goals:
+    - Resolve issues without creating rework
+    - Protect critical systems from rushed interventions
+    relationships:
+      lead: Feels pressured by rapid directives during peak load
+      analyst: Relies on data signals before committing to risky fixes
+  status:
+    agent_id: tech
+    display_name: Lin Zhao
+    role: technician
+    location: workbench
+    activity: null
+    attributes:
+      energy:
+        value: 64
+        unit: '%'
+        label: Energy
+      stress:
+        value: 43
+        unit: '%'
+        label: Stress
+    metadata:
+      persona: Methodical stabilizer with a cautious tempo
+      tension_note: Prefers careful sequencing and resists rushing repairs without
+        confidence.
+- profile:
+    agent_id: analyst
+    name: Jamie Rivera
+    age: 27
+    background: Data analyst responsible for anomaly detection and escalation quality.
+    role: analyst
+    personality: insightful, skeptical, detail-heavy
+    skills:
+      data_review: expert
+      forecasting: advanced
+    goals:
+    - Avoid false positives and false confidence
+    - Prioritize interventions with strongest evidence
+    relationships:
+      lead: Pushes back on directives lacking supporting data
+      tech: Flags likely failure points but expects disciplined follow-through
+  status:
+    agent_id: analyst
+    display_name: Jamie Rivera
+    role: analyst
+    location: ops
+    activity: null
+    attributes:
+      energy:
+        value: 80
+        unit: '%'
+        label: Energy
+      stress:
+        value: 34
+        unit: '%'
+        label: Stress
+    metadata:
+      persona: Independent skeptic focused on signal quality
+      tension_note: Challenges quick decisions when evidence is thin, which can feel
+        like delay.

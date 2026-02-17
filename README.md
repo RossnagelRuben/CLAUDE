@@ -37,15 +37,71 @@ git clone https://github.com/miniverse-ai/miniverse.git
 cd miniverse
 uv sync
 
-# Run workshop example (deterministic mode)
+# Configure LLM env vars (required for LLM demo stages)
+# If you already have .env, skip the copy.
+cp .env.example .env
+# Edit .env with your provider/model/API key, then export it:
+set -a; source .env; set +a
+
+# Run demo scripts (recommended)
+bash demo/workshop/run_baseline.sh
+bash demo/workshop/run_compare.sh
+bash demo/valentines/run.sh
+
+# Optional: run workshop example (deterministic mode)
 uv run python examples/workshop/run.py --ticks 10
 
-# Run with LLM cognition
+# Optional: run workshop example with LLM cognition
 export LLM_PROVIDER=openai
-export LLM_MODEL=gpt-4o
+export LLM_MODEL=gpt-5-nano
 export OPENAI_API_KEY=your_key
 uv run python examples/workshop/run.py --llm --ticks 10
 ```
+
+---
+
+## Demo Scripts
+
+Workshop demo assets live under `demo/workshop` and are file-driven:
+
+```bash
+# Setup + deterministic baseline
+bash demo/workshop/run_baseline.sh
+
+# Setup + deterministic + LLM comparison
+bash demo/workshop/run_compare.sh
+
+# Valentines demo (file-driven demo scenario)
+bash demo/valentines/run.sh
+```
+
+These scripts:
+- Read setup context from scenario files under `demo/` (e.g. `demo/workshop/scenario.yaml`,
+  `demo/valentines/scenario.yaml`)
+- Run deterministic and LLM stages via the core `miniverse run` command
+- Use fixed tick counts (no runtime tick overrides) for consistent demos
+- Use verbose LLM logging in comparison mode for readable plan/memory/reflection traces
+- Keep the demo behavior in files/scripts rather than custom CLI demo logic
+- Load scenario-local extensions declared in `metadata.runtime` (workshop uses
+  `demo/workshop/rules.py` + `demo/workshop/cognition.py`)
+- Surface shift-clock and queue-flow metrics per tick in verbose mode
+- Save baseline JSON + LLM verbose logs under `demo/workshop/logs/`, including
+  queue accounting (`initial + arrivals - completions`) and post-run baseline-vs-LLM comparison
+- Run a final LLM judge pass to produce an executive summary
+
+Preconfigured workshop demo scenario:
+- `demo/workshop/scenario.yaml`
+  - Includes workshop persona definitions directly in `agents[].profile/status`.
+
+Demo scripts:
+- `demo/workshop/run_baseline.sh`
+- `demo/workshop/run_compare.sh`
+- `demo/valentines/run.sh`
+
+LLM demo stages require exported env vars in your shell:
+- `LLM_PROVIDER`
+- `LLM_MODEL`
+- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
 
 ---
 
@@ -70,6 +126,11 @@ Miniverse combines **deterministic physics** with **emergent LLM cognition**:
 **Physics is predictable.** You control resource dynamics, constraints, and events.
 
 **Cognition is emergent.** Agents plan, communicate, and adapt based on their goals, personality, and memories.
+
+Policy terminology:
+- **World policy**: deterministic rules in `SimulationRules` (`apply_tick`, `process_actions`).
+- **Cognition policy**: agent decision policy (rule-based or LLM) in planner/executor/reflection modules.
+- Workshop demo compares these with the same world policy but different cognition policies.
 
 ---
 
@@ -103,9 +164,11 @@ uv run python examples/snake/run.py --ticks 40
 Recreation of Stanford Generative Agents' party coordination scenario.
 
 ```bash
-export LLM_PROVIDER=openai
-export LLM_MODEL=gpt-4o
-uv run python examples/smallville/valentines_party.py
+# Demo script (recommended)
+bash demo/valentines/run.sh
+
+# Direct CLI invocation
+uv run miniverse run demo/valentines/scenario.yaml --llm --world-engine deterministic --verbose --ticks 15
 ```
 
 ---
@@ -158,7 +221,6 @@ DEBUG_LLM=true DEBUG_MEMORY=true MINIVERSE_VERBOSE=true \
 | [VISION.md](VISION.md) | Project direction and goals |
 | [ROADMAP.md](ROADMAP.md) | Implementation phases |
 | [CLAUDE.md](CLAUDE.md) | Development guidelines |
-| [ISSUES.md](ISSUES.md) | Known issues and priorities |
 | [docs/USAGE.md](docs/USAGE.md) | Building simulations |
 | [docs/PROMPTS.md](docs/PROMPTS.md) | Prompt system guide |
 | [docs/architecture/](docs/architecture/) | Deep dives |
