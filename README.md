@@ -221,8 +221,10 @@ DEBUG_LLM=true DEBUG_MEMORY=true MINIVERSE_VERBOSE=true \
 | [VISION.md](VISION.md) | Project direction and goals |
 | [ROADMAP.md](ROADMAP.md) | Implementation phases |
 | [CLAUDE.md](CLAUDE.md) | Development guidelines |
-| [docs/USAGE.md](docs/USAGE.md) | Building simulations |
+| [docs/README.md](docs/README.md) | Documentation index |
+| [docs/USAGE.md](docs/USAGE.md) | Scenario authoring and runtime configuration |
 | [docs/PROMPTS.md](docs/PROMPTS.md) | Prompt system guide |
+| [docs/PARITY.md](docs/PARITY.md) | Generative Agents parity and differences |
 | [docs/architecture/](docs/architecture/) | Deep dives |
 
 ---
