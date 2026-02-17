@@ -15,11 +15,84 @@ Design principle: Start simple (FIFO), enable sophisticated (weighted retrieval)
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from collections import Counter
+import math
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 from datetime import datetime
 
 from miniverse.schemas import AgentMemory
+
+
+# ---------------------------------------------------------------------------
+# BM25 Scoring Utilities
+# ---------------------------------------------------------------------------
+
+def tokenize(text: str) -> List[str]:
+    """Simple tokenizer: lowercase, split on non-alphanumeric, filter short tokens."""
+    return [t for t in re.split(r'[^a-z0-9]+', text.lower()) if len(t) > 1]
+
+
+def compute_bm25_scores(
+    query_tokens: List[str],
+    documents: List[Tuple[str, List[str]]],  # (content, tokens)
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> List[Tuple[str, float]]:
+    """
+    Compute BM25 scores for documents given a query.
+
+    Returns list of (content, score) tuples sorted by score descending.
+    """
+    if not documents or not query_tokens:
+        return []
+
+    # Calculate corpus statistics
+    corpus_size = len(documents)
+    doc_lengths = [len(tokens) for _, tokens in documents]
+    avgdl = sum(doc_lengths) / corpus_size if corpus_size > 0 else 1.0
+
+    # Calculate document frequencies for IDF
+    doc_freqs: Dict[str, int] = Counter()
+    for _, tokens in documents:
+        unique_terms = set(tokens)
+        for term in unique_terms:
+            doc_freqs[term] += 1
+
+    # Calculate IDF for query terms
+    idf: Dict[str, float] = {}
+    for term in query_tokens:
+        df = doc_freqs.get(term, 0)
+        # BM25 Okapi IDF formula with floor at 0
+        idf[term] = max(0, math.log((corpus_size - df + 0.5) / (df + 0.5) + 1))
+
+    # Score each document
+    scored: List[Tuple[str, float]] = []
+    for i, (content, tokens) in enumerate(documents):
+        if not tokens:
+            continue
+
+        doc_len = doc_lengths[i]
+        term_freqs = Counter(tokens)
+        score = 0.0
+
+        for term in query_tokens:
+            if term not in term_freqs:
+                continue
+            tf = term_freqs[term]
+            term_idf = idf.get(term, 0)
+            # BM25 Okapi TF formula
+            numerator = tf * (k1 + 1)
+            denominator = tf + k1 * (1 - b + b * doc_len / avgdl)
+            score += term_idf * (numerator / denominator)
+
+        if score > 0:
+            scored.append((content, score))
+
+    # Sort by score descending
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
 
 
 class MemoryStrategy(ABC):
@@ -511,4 +584,224 @@ class ImportanceWeightedMemory(MemoryStrategy):
             run_id: Simulation run identifier
             agent_id: Agent identifier
         """
+        await self.persistence.clear_agent_memories(run_id, agent_id)
+
+
+class BM25MemoryStrategy(MemoryStrategy):
+    """
+    Memory retrieval using BM25 ranking combined with recency and importance.
+
+    This strategy implements proper information retrieval scoring:
+    - BM25 for term relevance (handles term frequency, document frequency, length normalization)
+    - Recency decay (fresher memories get a boost)
+    - Importance weighting (high-salience memories surface)
+
+    Good for:
+    - Medium to long simulations (>50 ticks)
+    - Scenarios where context relevance matters
+    - Research requiring realistic memory recall
+
+    Based on:
+    - BM25 Okapi (Robertson et al.)
+    - Stanford Generative Agents memory architecture
+    """
+
+    def __init__(
+        self,
+        persistence,
+        *,
+        bm25_weight: float = 0.5,
+        recency_weight: float = 0.3,
+        importance_weight: float = 0.2,
+        window: int = 200,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> None:
+        """
+        Initialize BM25 memory strategy.
+
+        Args:
+            persistence: PersistenceStrategy instance for storing memories
+            bm25_weight: Weight for BM25 relevance score (0-1)
+            recency_weight: Weight for recency (0-1)
+            importance_weight: Weight for importance score (0-1)
+            window: Maximum memories to consider for retrieval
+            k1: BM25 term frequency saturation parameter
+            b: BM25 document length normalization parameter
+        """
+        self.persistence = persistence
+        self.bm25_weight = bm25_weight
+        self.recency_weight = recency_weight
+        self.importance_weight = importance_weight
+        self.window = max(window, 1)
+        self.k1 = k1
+        self.b = b
+
+    async def initialize(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def add_memory(
+        self,
+        run_id: UUID,
+        agent_id: str,
+        tick: int,
+        memory_type: str,
+        content: str,
+        importance: int = 5,
+        *,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        embedding_key: Optional[str] = None,
+        branch_id: Optional[str] = None,
+    ) -> AgentMemory:
+        import uuid
+
+        memory = AgentMemory(
+            id=uuid.uuid4(),
+            run_id=run_id,
+            agent_id=agent_id,
+            tick=tick,
+            memory_type=memory_type,
+            content=content,
+            importance=importance,
+            tags=tags or [],
+            metadata=metadata or {},
+            embedding_key=embedding_key,
+            branch_id=branch_id,
+            created_at=datetime.now(),
+        )
+
+        await self.persistence.save_memory(run_id, memory)
+        return memory
+
+    async def get_recent_memories(
+        self, run_id: UUID, agent_id: str, limit: int = 10
+    ) -> List[str]:
+        memories = await self.persistence.get_recent_memories(run_id, agent_id, limit)
+        return [m.content for m in memories]
+
+    async def get_relevant_memories(
+        self,
+        run_id: UUID,
+        agent_id: str,
+        query: str,
+        limit: int = 5,
+    ) -> List[str]:
+        """
+        Retrieve memories relevant to a query using BM25 + recency + importance.
+
+        The scoring formula is:
+            final_score = bm25_weight * normalized_bm25
+                        + recency_weight * recency_score
+                        + importance_weight * normalized_importance
+
+        Args:
+            run_id: Simulation run identifier
+            agent_id: Agent identifier
+            query: Query string to find relevant memories
+            limit: Maximum number of memories to return
+
+        Returns:
+            List of relevant memory content strings
+        """
+        # Fetch candidate memories
+        candidate_memories = await self.persistence.get_recent_memories(
+            run_id, agent_id, self.window
+        )
+        if not candidate_memories:
+            return []
+
+        # Tokenize query
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            # No valid query tokens - fall back to recency + importance
+            return await self._score_without_query(candidate_memories, limit)
+
+        # Build document corpus for BM25: (content, tokens)
+        documents: List[Tuple[str, List[str]]] = []
+        memory_map: Dict[str, AgentMemory] = {}
+        for mem in candidate_memories:
+            # Include tags in searchable text
+            full_text = mem.content + " " + " ".join(mem.tags)
+            tokens = tokenize(full_text)
+            documents.append((mem.content, tokens))
+            memory_map[mem.content] = mem
+
+        # Compute BM25 scores
+        bm25_results = compute_bm25_scores(query_tokens, documents, self.k1, self.b)
+
+        if not bm25_results:
+            # No BM25 matches - fall back to recency + importance
+            return await self._score_without_query(candidate_memories, limit)
+
+        # Normalize BM25 scores to [0, 1]
+        max_bm25 = max(score for _, score in bm25_results) if bm25_results else 1.0
+        bm25_scores = {content: score / max_bm25 for content, score in bm25_results}
+
+        # Calculate recency and importance for matched documents
+        most_recent_tick = candidate_memories[0].tick
+        scored: List[Tuple[float, str]] = []
+
+        for content in bm25_scores:
+            mem = memory_map[content]
+
+            # Recency: exponential decay from most recent
+            recency_delta = max(most_recent_tick - mem.tick, 0)
+            recency_score = 1.0 / (1.0 + recency_delta)
+
+            # Importance: normalized to [0, 1]
+            importance_score = mem.importance / 10.0
+
+            # BM25 score (already normalized)
+            bm25_score = bm25_scores[content]
+
+            # Combined weighted score
+            final_score = (
+                self.bm25_weight * bm25_score
+                + self.recency_weight * recency_score
+                + self.importance_weight * importance_score
+            )
+
+            scored.append((final_score, content))
+
+        # Sort by final score and return top results
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [content for _, content in scored[:limit]]
+
+    async def _score_without_query(
+        self, memories: List[AgentMemory], limit: int
+    ) -> List[str]:
+        """Score memories using only recency and importance when no query matches."""
+        if not memories:
+            return []
+
+        most_recent_tick = memories[0].tick
+        scored: List[Tuple[float, str]] = []
+
+        for mem in memories[:limit * 2]:
+            recency_delta = max(most_recent_tick - mem.tick, 0)
+            recency_score = 1.0 / (1.0 + recency_delta)
+            importance_score = mem.importance / 10.0
+
+            # Adjust weights when no BM25: recency + importance only
+            adjusted_recency_weight = self.recency_weight / (
+                self.recency_weight + self.importance_weight
+            )
+            adjusted_importance_weight = self.importance_weight / (
+                self.recency_weight + self.importance_weight
+            )
+
+            final_score = (
+                adjusted_recency_weight * recency_score
+                + adjusted_importance_weight * importance_score
+            )
+            scored.append((final_score, mem.content))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [content for _, content in scored[:limit]]
+
+    async def clear_agent_memories(self, run_id: UUID, agent_id: str) -> None:
         await self.persistence.clear_agent_memories(run_id, agent_id)

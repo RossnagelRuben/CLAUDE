@@ -44,3 +44,6 @@ examples/smallville/*.txt
 
 # runs
 runs/
+
+# local planning notes
+plan.md

@@ -166,7 +166,13 @@ async def main():
     # LLM config
     provider = os.getenv('LLM_PROVIDER', 'openai')
     model = os.getenv('LLM_MODEL', 'gpt-5-nano')
+    try:
+        num_ticks = int(os.getenv('VALENTINES_TICKS', '10'))
+    except ValueError:
+        num_ticks = 10
+    num_ticks = max(1, num_ticks)
     print(f'\n🤖 LLM: {provider}/{model}')
+    print(f'⏱️ Ticks: {num_ticks}')
 
     # Initialize world state
     world_state = WorldState(
@@ -489,7 +495,7 @@ async def main():
     print('\n' + '=' * 80 + '\n')
 
     # Run simulation
-    result = await orchestrator.run(num_ticks=10)
+    result = await orchestrator.run(num_ticks=num_ticks)
 
     print('\n✅ Simulation complete!')
     print(f'   Run ID: {result["run_id"]}')

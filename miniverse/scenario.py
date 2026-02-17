@@ -1,8 +1,9 @@
 """
-Scenario loading and management for JSON-defined simulation initialization.
+Scenario loading and management for declarative simulation initialization.
 
-This module provides ScenarioLoader for converting JSON scenario files into WorldState
-and AgentProfile objects. Scenarios define the initial conditions for a simulation:
+This module provides ScenarioLoader for converting JSON/YAML scenario files into
+WorldState and AgentProfile objects. Scenarios define the initial conditions for
+a simulation:
 - Agent profiles (personality, skills, relationships)
 - Agent starting status (location, health, activity)
 - Environment state (temperature, time, weather)
@@ -12,13 +13,13 @@ and AgentProfile objects. Scenarios define the initial conditions for a simulati
 - Optional environment grid (Tier 2 spatial tiles)
 
 Design philosophy:
-- Scenarios are data (JSON), not code - enables non-programmers to create simulations
+- Scenarios are data (JSON/YAML), not code - enables non-programmers to create simulations
 - Validation ensures required fields present (prevents runtime errors)
 - Flexible schema via metadata fields (scenarios can extend without code changes)
 - Stat auto-conversion (simple values → full Stat objects with labels/units)
 
 Scenario file structure:
-```json
+```yaml
 {
   "name": "Mars Base Alpha",
   "description": "...",
@@ -42,12 +43,16 @@ Usage:
     # Pass to Orchestrator to start simulation
 """
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
 
 from .config import Config
+from .scenario_files import (
+    list_scenario_names,
+    load_structured_data_file,
+    resolve_scenario_file,
+)
 from .schemas import (
     WorldState,
     AgentProfile,
@@ -66,16 +71,16 @@ from .environment import (
 
 
 class ScenarioLoader:
-    """Load and validate simulation scenarios from JSON files.
+    """Load and validate simulation scenarios from JSON/YAML files.
 
-    ScenarioLoader handles all JSON parsing, validation, and conversion of scenario data
+    ScenarioLoader handles all parsing, validation, and conversion of scenario data
     into Pydantic models (WorldState, AgentProfile). Scenarios provide declarative
-    initialization - users define initial state in JSON rather than writing Python code.
+    initialization - users define initial state in a data file rather than writing Python code.
 
     Directory structure:
     - Default: {PROJECT_ROOT}/examples/scenarios/
     - Override via constructor: ScenarioLoader(Path("/custom/scenarios"))
-    - Scenario files: {scenario_name}.json (e.g., "mars_base.json")
+    - Scenario files: {scenario_name}.yaml/.yml/.json
 
     Validation:
     - Required fields: name, description, agents, environment, resources
@@ -99,21 +104,21 @@ class ScenarioLoader:
         self.scenarios_dir = scenarios_dir or (Config.PROJECT_ROOT / "examples" / "scenarios")
 
     def load(self, scenario_name: str) -> Tuple[WorldState, List[AgentProfile]]:
-        """Load a scenario by name from JSON file.
+        """Load a scenario by name from JSON/YAML file.
 
-        Main entry point for scenario loading. Reads JSON file, validates structure,
+        Main entry point for scenario loading. Reads scenario file, validates structure,
         parses agents/environment/resources, and constructs WorldState + AgentProfile list.
 
         Data flow:
-        1. Read {scenario_name}.json from scenarios directory
+        1. Resolve {scenario_name}.yaml/.yml/.json from scenarios directory
         2. Validate required fields (raises ValueError if invalid)
         3. Parse agent profiles and status for each agent
         4. Build initial WorldState from environment/resources/events
         5. Return (WorldState, [AgentProfile, ...]) tuple
 
         Args:
-            scenario_name: Name of scenario (without .json extension)
-                          Example: "mars_base" loads "mars_base.json"
+            scenario_name: Name of scenario (without extension) or filename.
+                          Example: "mars_base" loads "mars_base.yaml" if present.
 
         Returns:
             Tuple of (initial WorldState at tick 0, list of AgentProfiles)
@@ -121,17 +126,10 @@ class ScenarioLoader:
 
         Raises:
             FileNotFoundError: If scenario file doesn't exist in scenarios_dir
-            ValueError: If scenario JSON missing required fields or malformed
-            json.JSONDecodeError: If file contains invalid JSON
+            ValueError: If scenario data missing required fields or malformed
         """
-        scenario_path = self.scenarios_dir / f"{scenario_name}.json"
-
-        if not scenario_path.exists():
-            raise FileNotFoundError(
-                f"Scenario '{scenario_name}' not found at {scenario_path}"
-            )
-
-        data = json.loads(scenario_path.read_text())
+        scenario_path = resolve_scenario_file(self.scenarios_dir, scenario_name)
+        data = load_structured_data_file(scenario_path)
 
         # Validate required fields
         self._validate_scenario(data)
@@ -159,7 +157,7 @@ class ScenarioLoader:
         """Validate scenario data has required fields.
 
         Args:
-            data: Scenario JSON data
+            data: Scenario data
 
         Raises:
             ValueError: If required fields are missing
@@ -183,7 +181,7 @@ class ScenarioLoader:
         """Build initial WorldState from scenario data.
 
         Args:
-            data: Scenario JSON data
+            data: Scenario data
 
         Returns:
             Initial WorldState
@@ -240,7 +238,7 @@ class ScenarioLoader:
         - Mixed formats in same scenario (use detail where needed)
 
         Args:
-            raw: Raw metrics dictionary from JSON
+            raw: Raw metrics dictionary from scenario file
 
         Returns:
             Dict mapping metric keys to Stat objects
@@ -379,15 +377,9 @@ class ScenarioLoader:
         """List all available scenario files.
 
         Returns:
-            List of scenario names (without .json extension)
+            List of scenario names (without extension)
         """
-        if not self.scenarios_dir.exists():
-            return []
-
-        return [
-            f.stem for f in self.scenarios_dir.glob("*.json")
-            if not f.name.startswith("_")
-        ]
+        return list_scenario_names(self.scenarios_dir)
 
     def get_scenario_info(self, scenario_name: str) -> Dict[str, str]:
         """Get scenario metadata without loading full scenario.
@@ -398,8 +390,8 @@ class ScenarioLoader:
         Returns:
             Dict with name, description, num_agents, etc.
         """
-        scenario_path = self.scenarios_dir / f"{scenario_name}.json"
-        data = json.loads(scenario_path.read_text())
+        scenario_path = resolve_scenario_file(self.scenarios_dir, scenario_name)
+        data = load_structured_data_file(scenario_path)
 
         return {
             "name": data.get("name", scenario_name),

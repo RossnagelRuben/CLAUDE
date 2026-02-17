@@ -20,3 +20,19 @@ def test_scenario_loader_parses_metrics():
     assert isinstance(first_agent.current_activity, (str, type(None)))
 
     assert agents[first_agent.agent_id].name == first_agent.display_name
+
+
+def test_scenario_loader_accepts_yaml_filename():
+    loader = ScenarioLoader(scenarios_dir=Path("examples/workshop"))
+    world_state, profiles = loader.load("scenario.yaml")
+
+    assert world_state.tick == 0
+    assert len(profiles) == 3
+
+
+def test_scenario_loader_resolves_legacy_json_name_to_yaml():
+    loader = ScenarioLoader(scenarios_dir=Path("examples/workshop"))
+    world_state, profiles = loader.load("scenario.json")
+
+    assert world_state.tick == 0
+    assert len(profiles) == 3

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import textwrap
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -36,6 +38,28 @@ class LLMReflectionItem(BaseModel):
 
 class LLMReflectionResponse(BaseModel):
     reflections: List[LLMReflectionItem] = Field(default_factory=list)
+
+
+def _wrap_verbose_line(
+    text: str,
+    *,
+    prefix: str,
+    continuation: Optional[str] = None,
+) -> str:
+    normalized = " ".join(str(text).split())
+    if not normalized:
+        return prefix.rstrip()
+    terminal_width = shutil.get_terminal_size(fallback=(112, 24)).columns
+    width = max(76, min(140, terminal_width - 2))
+    width = max(width, len(prefix) + 20)
+    return textwrap.fill(
+        normalized,
+        width=width,
+        initial_indent=prefix,
+        subsequent_indent=continuation if continuation is not None else " " * len(prefix),
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
 
 
 class LLMPlanner(Planner):
@@ -96,6 +120,7 @@ class LLMPlanner(Planner):
         # Debug logging: Show LLM prompts if enabled
         import os
         debug_llm = os.getenv('DEBUG_LLM', '').lower() in ('1', 'true', 'yes')
+        verbose_llm = os.getenv("MINIVERSE_VERBOSE", "").lower() in ("1", "true", "yes")
         if debug_llm:
             print(f"\n{'='*80}")
             print(f"[LLM PLANNER] Agent: {agent_id}")
@@ -129,6 +154,16 @@ class LLMPlanner(Planner):
                 if step.metadata:
                     print(f"     Metadata: {step.metadata}")
             print(f"{'='*80}\n")
+        elif verbose_llm:
+            print(f"    [LLM Planner] {agent_id}: generated {len(response.steps)} plan step(s)")
+            for i, step in enumerate(response.steps[:1], 1):
+                print(
+                    _wrap_verbose_line(
+                        step.description,
+                        prefix=f"      {i}. ",
+                        continuation="         ",
+                    )
+                )
 
         # Convert LLM response (Pydantic models) to internal Plan/PlanStep dataclasses.
         # This decouples LLM response schema from internal planning representation,
@@ -238,6 +273,8 @@ class LLMReflectionEngine(ReflectionEngine):
                 if refl.metadata:
                     print(f"     Metadata: {refl.metadata}")
             print(f"{'='*80}\n")
+        # Verbose reflection rendering is handled centrally by orchestrator to
+        # avoid duplicate lines and preserve wrapped formatting.
 
         # Convert LLM response to ReflectionResult objects. Reflections are stored as
         # memories with elevated importance (typically 6-10 vs 5 for actions), making
@@ -345,6 +382,7 @@ class LLMExecutor(Executor):
         # Debug logging: Show LLM prompts if enabled
         import os
         debug_llm = os.getenv('DEBUG_LLM', '').lower() in ('1', 'true', 'yes')
+        verbose_llm = os.getenv("MINIVERSE_VERBOSE", "").lower() in ("1", "true", "yes")
         if debug_llm:
             print(f"\n{'='*80}")
             print(f"[LLM EXECUTOR] Agent: {agent_id}")
@@ -384,6 +422,25 @@ class LLMExecutor(Executor):
                 msg = action.communication.get('message', '')
                 print(f"  Message: {msg[:150]}..." if len(msg) > 150 else f"  Message: {msg}")
             print(f"{'='*80}\n")
+        elif verbose_llm:
+            target = f" target={action.target}" if action.target else ""
+            print(
+                _wrap_verbose_line(
+                    f"[LLM Executor] {agent_id}: {action.action_type}{target}",
+                    prefix="    ",
+                    continuation="      ",
+                )
+            )
+            if action.communication:
+                recipient = action.communication.get("to")
+                if recipient:
+                    print(
+                        _wrap_verbose_line(
+                            f"communication.to={recipient}",
+                            prefix="      ",
+                            continuation="        ",
+                        )
+                    )
 
         return action
 

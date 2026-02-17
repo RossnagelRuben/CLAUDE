@@ -39,7 +39,13 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
-        """Validate configuration and raise errors if required values are missing."""
+        """Validate configuration and raise errors if required values are missing.
+
+        Supported providers:
+        - openai: Requires OPENAI_API_KEY
+        - anthropic: Requires ANTHROPIC_API_KEY
+        - ollama: No API key needed (local models)
+        """
         if cls.LLM_PROVIDER == "anthropic" and not cls.ANTHROPIC_API_KEY:
             raise ValueError(
                 "ANTHROPIC_API_KEY is required when using the 'anthropic' provider"
@@ -49,6 +55,9 @@ class Config:
             raise ValueError(
                 "OPENAI_API_KEY is required when using the 'openai' provider"
             )
+
+        # Ollama runs locally - no API key needed
+        # Other providers (groq, together, etc.) may work via Mirascope but are untested
 
     @classmethod
     def display(cls) -> str:
