@@ -1,0 +1,139 @@
+{
+  "name": "Jarvis - Monitoreo servidor → WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Cada 15 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "command": "df -h / | tail -1 | awk '{print $5}' | tr -d '%'"
+      },
+      "id": "check-disk",
+      "name": "Uso de disco (%)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 200]
+    },
+    {
+      "parameters": {
+        "command": "free -m | awk 'NR==2{printf \"%.0f\", $3*100/$2}'"
+      },
+      "id": "check-memory",
+      "name": "Uso de RAM (%)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 360]
+    },
+    {
+      "parameters": {
+        "command": "uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | tr -d ' '"
+      },
+      "id": "check-load",
+      "name": "Load average (1min)",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 520]
+    },
+    {
+      "parameters": {
+        "jsCode": "const disk = parseInt($('Uso de disco (%)').item.json.stdout || '0');\nconst ram = parseInt($('Uso de RAM (%)').item.json.stdout || '0');\nconst load = parseFloat($('Load average (1min)').item.json.stdout || '0');\n\nconst alerts = [];\nif (disk >= 85) alerts.push(`⚠️ Disco: ${disk}% usado`);\nif (ram >= 85) alerts.push(`⚠️ RAM: ${ram}% usada`);\nif (load >= 2.0) alerts.push(`⚠️ Load: ${load}`);\n\nreturn [{\n  json: {\n    disk,\n    ram,\n    load,\n    alerts,\n    should_alert: alerts.length > 0,\n    message: alerts.length > 0\n      ? `🚨 *Alerta Jarvis*\\n` + alerts.join('\\n') + `\\n\\nDisco: ${disk}% | RAM: ${ram}% | Load: ${load}`\n      : ''\n  }\n}];"
+      },
+      "id": "evaluar-metricas",
+      "name": "Evaluar métricas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 360]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "condition-alert",
+              "leftValue": "={{ $json.should_alert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "hay-alertas",
+      "name": "¿Hay alertas?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 360]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://172.17.0.1:8080/message/sendText/jarvis",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={\n  \"number\": \"{{ $vars.WHATSAPP_ALLOWED_NUMBER }}\",\n  \"text\": \"{{ $json.message }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "enviar-whatsapp",
+      "name": "Enviar alerta por WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "notes": "Configurá: URL de Evolution API y número destino en WHATSAPP_ALLOWED_NUMBER (variable de N8N)"
+    }
+  ],
+  "connections": {
+    "Cada 15 minutos": {
+      "main": [
+        [
+          { "node": "Uso de disco (%)", "type": "main", "index": 0 },
+          { "node": "Uso de RAM (%)", "type": "main", "index": 0 },
+          { "node": "Load average (1min)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Uso de disco (%)": {
+      "main": [[{ "node": "Evaluar métricas", "type": "main", "index": 0 }]]
+    },
+    "Uso de RAM (%)": {
+      "main": [[{ "node": "Evaluar métricas", "type": "main", "index": 0 }]]
+    },
+    "Load average (1min)": {
+      "main": [[{ "node": "Evaluar métricas", "type": "main", "index": 0 }]]
+    },
+    "Evaluar métricas": {
+      "main": [[{ "node": "¿Hay alertas?", "type": "main", "index": 0 }]]
+    },
+    "¿Hay alertas?": {
+      "main": [
+        [{ "node": "Enviar alerta por WhatsApp", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

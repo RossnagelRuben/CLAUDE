@@ -1,0 +1,4 @@
+# Integración opcional con OpenClaw (backend de IA)
+# Instalar solo si usás OpenClaw: pip install -r requirements-openclaw.txt
+# Requiere una instancia de OpenClaw corriendo (gateway en ws://127.0.0.1:18789/gateway o OPENCLAW_OPENAI_BASE_URL)
+openclaw-sdk>=2.0.0

@@ -1,0 +1,41 @@
+---
+description: Cómo ejecutar y configurar N8N y Jarvis (bot Telegram) en este servidor
+alwaysApply: true
+---
+
+# Jarvis + N8N — Servidor y Cursor
+
+En este proyecto el asistente **Jarvis** es el bot de Telegram (`jarvis_bot.py`). N8N se usa para automatización y, opcionalmente, como intermediario en la transcripción de voz.
+
+## N8N (Docker)
+
+- **En este servidor no hay Node/npm en PATH.** N8N se ejecuta solo con Docker.
+- Arrancar: `docker start n8n` (si el contenedor ya existe).
+- Crear y arrancar (con HTTP por IP, sin HTTPS):  
+  `docker run -d --name n8n -p 5678:5678 -v n8n_data:/home/node/.n8n -e N8N_SECURE_COOKIE=false n8nio/n8n`
+- Interfaz: **http://&lt;IP_DEL_SERVIDOR&gt;:5678**
+- Ver estado: `docker ps | grep n8n`
+
+## API de transcripción (voz → texto)
+
+- Archivo: `transcription_api.py`. Levantar en un proceso aparte para que el bot no se bloquee al transcribir.
+- Comando (desde `telegram-bot`):  
+  `./venv/bin/uvicorn transcription_api:app --host 0.0.0.0 --port 8765`
+- En `.env` del bot: `TRANSCRIBE_API_URL=http://127.0.0.1:8765` (o URL del webhook N8N si usás N8N en el medio).
+
+## Jarvis (bot Telegram)
+
+- Ejecutar: desde `telegram-bot`, con el venv:  
+  `./venv/bin/python jarvis_bot.py`
+- Variables necesarias en `.env`: `TELEGRAM_TOKEN`, `CLAUDE_API_KEY`, `ALLOWED_CHAT_ID`, `AGENT_SECRET`. Ver `docs/TRANSCRIPCION_Y_N8N.md`.
+
+## Integración N8N con transcripción (opcional)
+
+- Flujo: Bot → Webhook N8N → API transcripción → respuesta al bot.
+- Workflow de ejemplo: `n8n/transcripcion-voz.json`. Importar en N8N y configurar la URL de la API en el nodo correspondiente.
+- En `.env` del bot poner la **Production URL** del webhook de N8N en `TRANSCRIBE_API_URL`.
+
+## Cursor y este proyecto
+
+- Al trabajar en este repo, el asistente de Cursor debe proponer **siempre comandos Docker para N8N** (nunca `npm`/`npx` para N8N).
+- El prompt del bot (`agent_prompt.txt`) ya indica a Jarvis que use Docker para N8N; mantener esa coherencia en reglas y documentación.

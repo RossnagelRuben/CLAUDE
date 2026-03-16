@@ -1,0 +1,6 @@
+# Dependencias para la API de transcripción (transcription_api.py)
+# Instalar: pip install -r requirements-transcription.txt
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+python-multipart
+# faster_whisper ya está en el proyecto del bot

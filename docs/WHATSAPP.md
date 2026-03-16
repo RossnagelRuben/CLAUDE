@@ -1,0 +1,121 @@
+# Jarvis en WhatsApp
+
+Integración WhatsApp usando **Evolution API** (self-hosted) + `whatsapp_bridge.py`.
+
+## Arquitectura
+
+```
+WhatsApp
+  ↕
+Evolution API  (Docker, puerto 8080)
+  ↕ webhook POST /webhook
+whatsapp_bridge.py  (FastAPI, puerto 8766)
+  ↕
+Claude API  (mismo system prompt que Telegram)
+  ↕
+server_executor.py  (comandos del servidor)
+```
+
+N8N corre independiente para monitoreo proactivo (alertas automáticas por WhatsApp).
+
+---
+
+## 1. Levantar Evolution API
+
+```bash
+docker run -d \
+  --name evolution-api \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -e SERVER_URL=http://TU_IP_PUBLICA:8080 \
+  -e AUTHENTICATION_API_KEY=jarvis-secret \
+  -e WEBHOOK_GLOBAL_URL=http://172.17.0.1:8766/webhook \
+  -e WEBHOOK_GLOBAL_ENABLED=true \
+  -e WEBHOOK_EVENTS_MESSAGES_UPSERT=true \
+  -v evolution_store:/evolution/store \
+  atendai/evolution-api:latest
+```
+
+> `172.17.0.1` es la IP del host desde dentro de Docker. Si el bridge corre en el host, esto funciona directamente.
+
+---
+
+## 2. Crear instancia y escanear QR
+
+```bash
+# Crear instancia llamada "jarvis"
+curl -X POST http://localhost:8080/instance/create \
+  -H "apikey: jarvis-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"instanceName": "jarvis", "qrcode": true}'
+
+# Ver QR en el navegador
+curl http://localhost:8080/instance/qrcode/jarvis \
+  -H "apikey: jarvis-secret"
+```
+
+Abrir WhatsApp → Dispositivos vinculados → Vincular dispositivo → escanear QR.
+
+---
+
+## 3. Configurar `.env`
+
+```env
+EVOLUTION_API_URL=http://localhost:8080
+EVOLUTION_API_KEY=jarvis-secret
+EVOLUTION_INSTANCE=jarvis
+WHATSAPP_ALLOWED_NUMBERS=549XXXXXXXXXX   # tu número, sin + ni espacios
+WHATSAPP_SESSION_HOURS=8
+```
+
+---
+
+## 4. Iniciar el bridge
+
+```bash
+./venv/bin/uvicorn whatsapp_bridge:app --host 0.0.0.0 --port 8766
+```
+
+Verificar estado: `curl http://localhost:8766/status`
+
+---
+
+## 5. Uso desde WhatsApp
+
+1. Enviá tu `AGENT_SECRET` al número vinculado → Jarvis responde "Sesión iniciada".
+2. A partir de ahí, chateá normalmente igual que con Telegram.
+
+**Comandos que entiende Jarvis:**
+- Texto libre → responde con Claude
+- Si Claude sugiere un comando del servidor → te pregunta confirmación → respondé `SI` para ejecutar
+- Búsquedas web → automático cuando Claude usa `BUSCAR:`
+- Notas → guardadas en `notes/` cuando Claude usa `NOTA:`
+
+**La sesión expira** después de `WHATSAPP_SESSION_HOURS` horas. Volvé a mandar la clave para reactivar.
+
+---
+
+## 6. Monitoreo proactivo con N8N
+
+Importar `n8n/whatsapp-monitoreo.json` en N8N:
+
+1. Ir a N8N → Workflows → Import from file
+2. Importar `n8n/whatsapp-monitoreo.json`
+3. En el nodo "Enviar alerta por WhatsApp":
+   - Cambiar la URL a `http://172.17.0.1:8080/message/sendText/jarvis`
+   - En el body, reemplazar `WHATSAPP_ALLOWED_NUMBER` con tu número
+   - Agregar header `apikey: jarvis-secret`
+4. Activar el workflow
+
+El workflow revisa disco, RAM y load cada 15 minutos. Si alguno supera el 85%, te manda un WhatsApp automático.
+
+---
+
+## Solución de problemas
+
+| Problema | Causa probable | Solución |
+|---|---|---|
+| Evolution API no recibe QR | `SERVER_URL` incorrecto | Usar IP pública o `localhost` según acceso |
+| Bridge no recibe webhooks | `WEBHOOK_GLOBAL_URL` apunta mal | Verificar que `172.17.0.1:8766` sea accesible desde el contenedor |
+| Jarvis no responde | Número no en `WHATSAPP_ALLOWED_NUMBERS` | Agregar número al `.env` y reiniciar bridge |
+| "Evolution API no configurada" | `EVOLUTION_API_URL` vacío en `.env` | Completar variable y reiniciar bridge |

@@ -1,0 +1,88 @@
+{
+  "name": "Jarvis - Transcripción de voz",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "transcribir",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-transcribe",
+      "name": "Webhook Recibir audio",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "jarvis-transcribe"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://172.17.0.1:8765/transcribe",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "audio",
+              "inputDataFieldName": "audio",
+              "fileName": "=voice.ogg"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "http-transcribe-api",
+      "name": "Llamar API transcripción",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "notes": "Configurá la URL si tu API no está en localhost:8765"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ typeof $json.body === 'object' ? $json.body : $json }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Responder al Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Recibir audio": {
+      "main": [
+        [
+          {
+            "node": "Llamar API transcripción",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llamar API transcripción": {
+      "main": [
+        [
+          {
+            "node": "Responder al Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

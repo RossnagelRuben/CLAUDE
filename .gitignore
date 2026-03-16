@@ -1,0 +1,14 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.log
+*.lock
+.jarvis_session
+voice_tmp/
+agent_data/
+audio/
+audio.ogg
+productos_imagenes/
+logs/
+notes/

@@ -1,0 +1,25 @@
+---
+description: Aplicar SOLID, comentarios útiles y documentación MD en todo cambio de código
+globs: 
+alwaysApply: true
+---
+
+# Estándares de código: SOLID, comentarios y documentación
+
+Siempre que modifiques o añadas código en este proyecto:
+
+1. **Principios SOLID**
+   - **SRP**: Un módulo/clase una sola responsabilidad (p. ej. formateo en `formatter.py`, log DRR en `drr/logger.py`).
+   - **OCP/DIP**: Preferir abstracciones (protocolos, inyección) para extender sin modificar de más.
+   - Comentar brevemente en módulos clave cómo se aplica (p. ej. "Principio SRP: este módulo solo...").
+
+2. **Comentarios útiles**
+   - En funciones no triviales: docstring con propósito y parámetros/retorno cuando ayude.
+   - Comentarios inline para lógica que no sea obvia (por qué se filtra, qué evita un bug, etc.).
+   - Evitar comentarios que repitan lo que dice el código.
+
+3. **Documentación MD**
+   - Si añadís una feature o flujo importante (nuevos comandos, logs, integraciones), actualizar o crear un `.md` en `docs/` (por ejemplo `DRR_BOT_UI_LOGS.md`, `DOCUMENTACION_MIGRACION_DRR.md`).
+   - En el MD: propósito, cómo se usa, dónde está el código relevante y, si aplica, cómo depurar (logs, variables de entorno).
+
+Aplicar estas reglas en cada cambio, no solo en “documentación” aislada.
