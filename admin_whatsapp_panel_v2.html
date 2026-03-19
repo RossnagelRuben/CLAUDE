@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jarvis - WhatsApp Admin</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        background: radial-gradient(circle at 10% 10%, #1f2a44 0%, #0b1220 55%, #070b14 100%);
+      }
+      .panel {
+        max-width: 980px;
+      }
+      .glass {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        backdrop-filter: blur(10px);
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      }
+      .badge-num {
+        background: rgba(13, 110, 253, 0.95);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+    </style>
+  </head>
+  <body class="text-light">
+    <div class="container py-4">
+      <div class="panel mx-auto">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div>
+            <div class="fw-semibold fs-5">Jarvis WhatsApp - Panel de Numeros</div>
+            <div class="text-secondary small">Admin para WHATSAPP_ALLOWED_NUMBERS y WHATSAPP_PHONE_MAP</div>
+          </div>
+          <div class="text-secondary small mono">/admin/whatsapp</div>
+        </div>
+
+        <div id="app"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      const appEl = document.getElementById("app");
+
+      function normalizeDigits(s) {
+        return String(s || "").replace(/\D/g, "");
+      }
+
+      function uniq(arr) {
+        return Array.from(new Set(arr));
+      }
+
+      function tokenFromStorage() {
+        try {
+          return localStorage.getItem("admin_token") || "";
+        } catch {
+          return "";
+        }
+      }
+
+      function setTokenToStorage(t) {
+        try {
+          localStorage.setItem("admin_token", t);
+        } catch {
+          // ignore
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      const state = {
+        token: tokenFromStorage(),
+        loading: false,
+        error: "",
+        allowedNumbers: [],
+        phoneMap: [] // {from,to}
+      };
+
+      function renderTokenUI() {
+        appEl.innerHTML = `
+          <div class="glass p-4">
+            <div class="mb-2 fw-semibold">Autenticacion</div>
+            <div class="text-secondary small mb-3">Pegá el token admin para editar numeros permitidos.</div>
+            <div class="row g-2 align-items-end">
+              <div class="col-12 col-md-8">
+                <label class="form-label text-secondary small">Token</label>
+                <input id="tokenInput" class="form-control" value="${escapeHtml(state.token)}" placeholder="Bearer token" />
+              </div>
+              <div class="col-12 col-md-4">
+                <button id="loadBtn" class="btn btn-primary w-100" ${state.loading ? "disabled" : ""}>
+                  Cargar
+                </button>
+              </div>
+            </div>
+            <div id="errBox" class="alert alert-danger mt-3 mb-0 d-none"></div>
+          </div>
+        `;
+
+        const tokenInput = document.getElementById("tokenInput");
+        tokenInput.addEventListener("input", (e) => {
+          state.token = e.currentTarget.value || "";
+        });
+
+        document.getElementById("loadBtn").addEventListener("click", () => {
+          const t = (state.token || "").trim();
+          if (!t) return showError("Ingresar token");
+          setTokenToStorage(t);
+          fetchConfig();
+        });
+      }
+
+      function showError(msg) {
+        state.error = String(msg || "");
+        const errBox = document.getElementById("errBox");
+        if (errBox) {
+          errBox.textContent = state.error;
+          errBox.classList.remove("d-none");
+        }
+      }
+
+      function hideError() {
+        state.error = "";
+        const errBox = document.getElementById("errBox");
+        if (errBox) errBox.classList.add("d-none");
+      }
+
+      function renderNumbersUI() {
+        const allowedBadges = (state.allowedNumbers || []).map((n) => {
+          return `
+            <span class="badge badge-num p-2 d-flex align-items-center gap-2 me-2 mb-2">
+              <span class="mono">${escapeHtml(n)}</span>
+              <button class="btn btn-sm btn-link text-decoration-none text-light p-0 ms-1" data-action="removeAllowed" data-n="${escapeHtml(n)}" type="button">x</button>
+            </span>
+          `;
+        }).join("");
+
+        const phoneRows = (state.phoneMap || []).map((item, i) => {
+          return `
+            <div class="row g-2 align-items-center mb-2" data-row="${i}">
+              <div class="col-5 col-md-6">
+                <input class="form-control mono" data-action="editFrom" data-i="${i}" value="${escapeHtml(item.from || "")}" placeholder="from (entrada)" />
+              </div>
+              <div class="col-5 col-md-5">
+                <input class="form-control mono" data-action="editTo" data-i="${i}" value="${escapeHtml(item.to || "")}" placeholder="to (envio)" />
+              </div>
+              <div class="col-2 col-md-1 text-end">
+                <button class="btn btn-outline-light" data-action="removeMap" data-i="${i}" type="button">x</button>
+              </div>
+            </div>
+          `;
+        }).join("");
+
+        appEl.innerHTML = `
+          <div class="glass p-4">
+            <div class="row g-3">
+              <div class="col-12 col-lg-6">
+                <div class="fw-semibold mb-2">WHATSAPP_ALLOWED_NUMBERS</div>
+                <div class="text-secondary small mb-3">
+                  Lista de numeros permitidos (se comparan con phone_norm del webhook).
+                </div>
+
+                <div class="d-flex gap-2 mb-3">
+                  <input id="addAllowedInput" class="form-control mono" placeholder="ej: 41794157573" />
+                  <button id="addAllowedBtn" class="btn btn-outline-light" type="button">Agregar</button>
+                </div>
+
+                <div class="d-flex flex-wrap">
+                  ${allowedBadges || `<div class="text-secondary small">Sin numeros.</div>`}
+                </div>
+              </div>
+
+              <div class="col-12 col-lg-6">
+                <div class="fw-semibold mb-2">WHATSAPP_PHONE_MAP (avanzado)</div>
+                <div class="text-secondary small mb-3">
+                  Mapea phone_norm (entrada) -> numero real (salida) para evitar exists:false en Evolution.
+                </div>
+
+                <div class="d-flex flex-column">
+                  ${phoneRows || `<div class="text-secondary small">Sin mapeos.</div>`}
+                </div>
+
+                <div class="mt-3">
+                  <button id="addMapBtn" class="btn btn-outline-light w-100" type="button">
+                    Agregar mapeo
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="d-flex justify-content-end gap-2 mt-4">
+              <button id="reloadBtn" class="btn btn-outline-light" type="button" ${state.loading ? "disabled" : ""}>
+                Recargar
+              </button>
+              <button id="saveBtn" class="btn btn-success" type="button" ${state.loading ? "disabled" : ""}>
+                Guardar cambios
+              </button>
+              <button id="logsBtn" class="btn btn-outline-info" type="button" ${state.loading ? "disabled" : ""}>
+                Ver últimos mensajes
+              </button>
+            </div>
+
+            <div class="text-secondary small mt-3">
+              Nota: el bridge usa el .env en runtime; este panel re-carga la configuracion en memoria.
+            </div>
+
+            <div id="errBox" class="alert alert-danger mt-3 mb-0 d-none"></div>
+          </div>
+
+          <div
+            id="logsModal"
+            style="
+              position: fixed;
+              inset: 0;
+              background: rgba(0,0,0,0.55);
+              display: none;
+              z-index: 9999;
+            "
+          >
+            <div
+              class="glass"
+              style="
+                position: absolute;
+                left: 50%;
+                top: 50%;
+                transform: translate(-50%, -50%);
+                width: min(980px, calc(100vw - 24px));
+                max-height: calc(100vh - 24px);
+                overflow: hidden;
+              "
+            >
+              <div class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom" style="border-color: rgba(255,255,255,0.12) !important;">
+                <div class="fw-semibold">Últimos mensajes recibidos</div>
+                <button id="closeLogsBtn" class="btn btn-sm btn-outline-light" type="button">Cerrar</button>
+              </div>
+              <div style="padding: 12px;">
+                <pre id="logsPre" class="mono" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: calc(100vh - 160px); overflow: auto;"></pre>
+              </div>
+            </div>
+          </div>
+        `;
+
+        // Allowed add/remove
+        const addAllowedInput = document.getElementById("addAllowedInput");
+        document.getElementById("addAllowedBtn").addEventListener("click", () => {
+          const n = normalizeDigits(addAllowedInput.value);
+          if (!n) return;
+          state.allowedNumbers = uniq([...(state.allowedNumbers || []), n]);
+          addAllowedInput.value = "";
+          renderNumbersUI();
+        });
+        addAllowedInput.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          document.getElementById("addAllowedBtn").click();
+        });
+
+        appEl.querySelectorAll('[data-action="removeAllowed"]').forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const n = btn.getAttribute("data-n");
+            state.allowedNumbers = (state.allowedNumbers || []).filter((x) => x !== n);
+            // también limpiamos mapeos donde from ya no esté permitido (mantenemos regla simple)
+            state.phoneMap = (state.phoneMap || []).filter((m) => (state.allowedNumbers || []).includes(m.from));
+            renderNumbersUI();
+          });
+        });
+
+        // Map edit/remove
+        appEl.querySelectorAll("[data-action='editFrom']").forEach((inp) => {
+          inp.addEventListener("input", () => {
+            const i = Number(inp.getAttribute("data-i"));
+            const v = normalizeDigits(inp.value);
+            state.phoneMap[i].from = v;
+          });
+        });
+        appEl.querySelectorAll("[data-action='editTo']").forEach((inp) => {
+          inp.addEventListener("input", () => {
+            const i = Number(inp.getAttribute("data-i"));
+            const v = normalizeDigits(inp.value);
+            state.phoneMap[i].to = v;
+          });
+        });
+        appEl.querySelectorAll("[data-action='removeMap']").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const i = Number(btn.getAttribute("data-i"));
+            state.phoneMap = (state.phoneMap || []).filter((_, idx) => idx !== i);
+            renderNumbersUI();
+          });
+        });
+
+        document.getElementById("addMapBtn").addEventListener("click", () => {
+          state.phoneMap = [...(state.phoneMap || []), { from: "", to: "" }];
+          renderNumbersUI();
+        });
+
+        document.getElementById("reloadBtn").addEventListener("click", () => fetchConfig());
+        document.getElementById("saveBtn").addEventListener("click", () => saveConfig());
+
+        const logsBtn = document.getElementById("logsBtn");
+        const logsModal = document.getElementById("logsModal");
+        const closeLogsBtn = document.getElementById("closeLogsBtn");
+        const logsPre = document.getElementById("logsPre");
+
+        function openLogsModal(text) {
+          if (logsPre) logsPre.textContent = text || "";
+          if (logsModal) logsModal.style.display = "block";
+        }
+
+        function closeLogsModal() {
+          if (logsModal) logsModal.style.display = "none";
+        }
+
+        if (closeLogsBtn) closeLogsBtn.addEventListener("click", closeLogsModal);
+        if (logsModal) {
+          logsModal.addEventListener("click", (e) => {
+            if (e.target === logsModal) closeLogsModal();
+          });
+        }
+
+        async function fetchLogs() {
+          try {
+            const token = (state.token || "").trim();
+            if (!token) throw new Error("Falta token");
+            if (logsPre) logsPre.textContent = "Cargando...";
+            openLogsModal();
+
+            const res = await fetch(`/admin/whatsapp/api/logs?limit=80`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const js = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(js.error || js.detail || `HTTP ${res.status}`);
+            const lines = js.lines || [];
+            openLogsModal(lines.join("\\n"));
+          } catch (e) {
+            openLogsModal(String(e?.message || e));
+          }
+        }
+
+        if (logsBtn) logsBtn.addEventListener("click", fetchLogs);
+      }
+
+      function render() {
+        hideError();
+        if ((state.token || "").trim()) return renderNumbersUI();
+        return renderTokenUI();
+      }
+
+      async function fetchConfig() {
+        state.loading = true;
+        state.error = "";
+        hideError();
+        render();
+
+        try {
+          const token = (state.token || "").trim();
+          const res = await fetch("/admin/whatsapp/api/config", {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const js = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(js.error || js.detail || `HTTP ${res.status}`);
+          state.allowedNumbers = js.allowedNumbers || [];
+          state.phoneMap = js.phoneMap || [];
+        } catch (e) {
+          showError(String(e?.message || e));
+        } finally {
+          state.loading = false;
+          render();
+        }
+      }
+
+      function buildPayload() {
+        let allowed = (state.allowedNumbers || []).map(normalizeDigits).filter(Boolean);
+        allowed = uniq(allowed).sort((a, b) => (a < b ? -1 : 1));
+
+        // Validamos mapeos: src/dst con digits y dst libre, src debe quedar permitido
+        const phoneMap = (state.phoneMap || [])
+          .map((x) => ({ from: normalizeDigits(x.from), to: normalizeDigits(x.to) }))
+          .filter((x) => x.from && x.to);
+
+        // Asegurar que cada from del map esté en allowed (regla simple).
+        const froms = phoneMap.map((m) => m.from);
+        allowed = uniq([...allowed, ...froms]).sort((a, b) => (a < b ? -1 : 1));
+
+        const allowedSet = new Set(allowed);
+        const phoneMapFiltered = phoneMap.filter((m) => allowedSet.has(m.from));
+
+        return {
+          allowedNumbers: allowed,
+          phoneMap: phoneMapFiltered
+        };
+      }
+
+      async function saveConfig() {
+        state.loading = true;
+        state.error = "";
+        hideError();
+        render();
+
+        try {
+          const token = (state.token || "").trim();
+          if (!token) throw new Error("Falta token");
+
+          const payload = buildPayload();
+          const res = await fetch("/admin/whatsapp/api/config", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify(payload)
+          });
+          const js = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(js.error || js.detail || `HTTP ${res.status}`);
+
+          state.allowedNumbers = js.allowedNumbers || payload.allowedNumbers;
+          state.phoneMap = js.phoneMap || payload.phoneMap;
+        } catch (e) {
+          showError(String(e?.message || e));
+        } finally {
+          state.loading = false;
+          render();
+        }
+      }
+
+      render();
+      // Si ya hay token guardado, intentamos cargar.
+      if ((state.token || "").trim()) fetchConfig();
+    </script>
+  </body>
+</html>
+

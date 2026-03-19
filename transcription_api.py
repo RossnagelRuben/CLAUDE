@@ -7,6 +7,7 @@ Timeouts: la transcripción se ejecuta en thread con límite de tiempo para no c
 la petición si el audio es muy largo o el modelo tarda.
 """
 import asyncio
+import base64
 import logging
 import tempfile
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 # Reutilizar la misma lógica que el bot (faster_whisper)
 from transcribe_core import transcribe_voice
@@ -62,6 +64,65 @@ async def transcribe(audio: UploadFile = File(...)):
         raise HTTPException(status_code=504, detail=f"Transcripción superó el tiempo límite ({TRANSCRIBE_REQUEST_TIMEOUT}s)")
     except Exception as e:
         logger.exception("Error transcribiendo: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+    finally:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class TranscribeBase64Request(BaseModel):
+    audio_base64: str
+    filename: str | None = None
+
+
+@app.post("/transcribe_base64")
+async def transcribe_base64(req: TranscribeBase64Request):
+    """
+    Variante JSON para integraciones que no envían multipart/form-data.
+    Espera: {"audio_base64": "...", "filename": "voice.ogg" (opcional)}
+    Respuesta: {"text": "..."}.
+    """
+    filename = req.filename or "audio.ogg"
+    suffix = Path(filename).suffix or ".ogg"
+    if suffix.lower() not in (".ogg", ".oga", ".mp3", ".wav", ".m4a"):
+        suffix = ".ogg"
+
+    try:
+        body = base64.b64decode(req.audio_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="audio_base64 no es base64 válido")
+
+    if len(body) > 25 * 1024 * 1024:  # 25 MB
+        raise HTTPException(status_code=400, detail="Archivo demasiado grande (máx 25 MB)")
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(body)
+        path = f.name
+
+    start = time.perf_counter()
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(transcribe_voice, path),
+            timeout=TRANSCRIBE_REQUEST_TIMEOUT,
+        )
+        duration = time.perf_counter() - start
+        logger.info("Transcripción (base64) OK en %.2fs, %d bytes", duration, len(body))
+        return JSONResponse(content={"text": text or "(sin voz detectada)"})
+    except asyncio.TimeoutError:
+        duration = time.perf_counter() - start
+        logger.warning(
+            "Transcripción (base64) timeout tras %.1fs (límite %ds)",
+            duration,
+            TRANSCRIBE_REQUEST_TIMEOUT,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"Transcripción superó el tiempo límite ({TRANSCRIBE_REQUEST_TIMEOUT}s)",
+        )
+    except Exception as e:
+        logger.exception("Error transcribiendo (base64): %s", e)
         raise HTTPException(status_code=500, detail=str(e)[:200])
     finally:
         try:

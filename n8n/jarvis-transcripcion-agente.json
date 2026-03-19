@@ -1,0 +1,169 @@
+{
+  "id": "2",
+  "name": "Jarvis - Transcripción (Agente Chat)",
+  "description": "Agente de Chat Hub que transcribe audios subidos usando la API /transcribe_base64.",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "mode": "hostedChat",
+        "authentication": "none",
+        "availableInChat": true,
+        "agentName": "Jarvis - Transcripción",
+        "agentDescription": "Subí un audio aquí y transcribo a texto.",
+        "options": {
+          "allowFileUploads": true,
+          "allowedFilesMimeTypes": "audio/*",
+          "inputPlaceholder": "Subí un audio para transcribir...",
+          "responseMode": "streaming",
+          "loadPreviousSession": "memory"
+        }
+      },
+      "id": "chat-trigger",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        260,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 5
+      },
+      "id": "simple-memory",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        260,
+        470
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-5-mini",
+        "responsesApiEnabled": true,
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "openai-chat-model",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        500,
+        120
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "kx27Lsk23DBRC4cC",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "auto",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "systemMessage": "Eres Jarvis. Tu tarea es transcribir audios subidos por el usuario.\n\nSi el usuario sube un audio, llama a la herramienta `transcribe_audio` para obtener el texto y responde SOLO con la transcripción (sin explicaciones).\n\nSi NO hay audio, pedí al usuario que suba un archivo de audio.",
+          "maxIterations": 5,
+          "returnIntermediateSteps": false,
+          "passthroughBinaryImages": true,
+          "enableStreaming": true,
+          "batching": {}
+        }
+      },
+      "id": "ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        500,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "Transcribe un audio usando la API local. Usa el archivo subido en el chat (normalmente binary `data0`) y lo envía como base64 al endpoint /transcribe_base64.",
+        "method": "POST",
+        "url": "http://172.17.0.1:8765/transcribe_base64",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\"audio_base64\": ($binary.data0?.data ?? ''), \"filename\": ($binary.data0?.fileName ?? 'audio.ogg')} }}",
+        "responseType": "json",
+        "dataField": "text"
+      },
+      "id": "tool-transcribe",
+      "name": "Transcribe Audio Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        760,
+        320
+      ]
+    }
+  ],
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Chat Trigger",
+            "type": "ai_memory",
+            "index": 0
+          },
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcribe Audio Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
+

@@ -78,8 +78,12 @@ BUSCAR_IMAGEN: consulta de búsqueda de imagen (en español, breve: ej. motocier
    Una sola línea. El bot buscará imágenes, descargará la primera y la guardará. Luego el usuario puede decir "editala para agregar X" o usar /editarimagen. Si el usuario pide "buscar imagen X y editarla con Y", poné solo BUSCAR_IMAGEN: X (el bot guarda la imagen; después el usuario dirá Y para editarla).
 
 7) CUANDO PIDA CONSULTAR PRODUCTOS (código de barras, descripción, listar productos, ver producto, buscar imagen de producto)
-   Decile que puede usar el menú DRR en Telegram:
-   "Podés usar /productos en Telegram para consultar productos, filtrar por descripción o código de barras, ver detalle, buscar imágenes con DuckDuckGo, guardar o mejorar la imagen. Escribí /productos para ver todos los subcomandos."
+   Respondé EXACTAMENTE con una sola línea:
+   PRODUCTOS: descripcion | cantidad
+   Ejemplo para "traeme 5 martillos": PRODUCTOS: martillo | 5
+   Ejemplo para "traeme 10 productos": PRODUCTOS: | 10
+   Si no especifica descripción dejá vacío antes del |. Si no especifica cantidad usá 5.
+   No agregues ningún texto extra, solo esa línea.
 
 Reglas:
 - Cualquier pedido de cambio o ejecución en el servidor (archivos, instalación, servicios, scripts, etc.) → SIEMPRE ACCION: + CMD: con un comando concreto. No solo expliques; proponé el comando.

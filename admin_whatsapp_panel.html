@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jarvis - WhatsApp Admin</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      body {
+        background: radial-gradient(circle at 10% 10%, #1f2a44 0%, #0b1220 55%, #070b14 100%);
+      }
+      .panel {
+        max-width: 980px;
+      }
+      .glass {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 16px;
+        backdrop-filter: blur(10px);
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      }
+    </style>
+  </head>
+
+  <body class="text-light">
+    <div class="container py-4">
+      <div class="panel mx-auto">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div>
+            <div class="fw-semibold fs-5">Jarvis WhatsApp - Panel de Numeros</div>
+            <div class="text-secondary small">Admin para WHATSAPP_ALLOWED_NUMBERS y WHATSAPP_PHONE_MAP</div>
+          </div>
+          <div class="text-secondary small mono">/admin/whatsapp</div>
+        </div>
+
+        <div id="app"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { createSignal, onMount, For, Show, createMemo } from "https://esm.sh/solid-js@1.9.7";
+      import { render } from "https://esm.sh/solid-js@1.9.7/web";
+
+      function normalizeDigits(s) {
+        return String(s || "").replace(/\D/g, "");
+      }
+
+      function pairToStr(from, to) {
+        return `${normalizeDigits(from)}:${normalizeDigits(to)}`;
+      }
+
+      function uniq(arr) {
+        return Array.from(new Set(arr));
+      }
+
+      function tokenFromStorage() {
+        try {
+          return localStorage.getItem("admin_token") || "";
+        } catch {
+          return "";
+        }
+      }
+
+      function setTokenToStorage(t) {
+        try {
+          localStorage.setItem("admin_token", t);
+        } catch {
+          // ignore
+        }
+      }
+
+      function App() {
+        const [token, setToken] = createSignal(tokenFromStorage());
+        const [loading, setLoading] = createSignal(false);
+        const [error, setError] = createSignal("");
+
+        const [allowedNumbers, setAllowedNumbers] = createSignal([]);
+        const [phoneMap, setPhoneMap] = createSignal([]);
+
+        const allowedSet = createMemo(() => new Set(allowedNumbers()));
+
+        async function fetchConfig() {
+          setLoading(true);
+          setError("");
+          try {
+            const res = await fetch("/admin/whatsapp/api/config", {
+              headers: {
+                Authorization: `Bearer ${token().trim()}`,
+              },
+            });
+            const js = await res.json();
+            if (!res.ok) throw new Error(js.error || `HTTP ${res.status}`);
+
+            setAllowedNumbers(js.allowedNumbers || []);
+            setPhoneMap(js.phoneMap || []);
+          } catch (e) {
+            setError(String(e?.message || e));
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        async function saveConfig() {
+          setLoading(true);
+          setError("");
+          try {
+            const payload = {
+              allowedNumbers: allowedNumbers().map(normalizeDigits).filter(Boolean),
+              phoneMap: phoneMap()
+                .map((x) => ({ from: normalizeDigits(x.from), to: normalizeDigits(x.to) }))
+                .filter((x) => x.from && x.to),
+            };
+
+            // Hard validation: no duplicates, no blank entries.
+            payload.allowedNumbers = uniq(payload.allowedNumbers);
+            for (const item of payload.phoneMap) {
+              if (!payload.allowedNumbers.includes(item.from)) {
+                // Keep it simple: enforce that mapping sources must also be allowed.
+                payload.allowedNumbers.push(item.from);
+              }
+            }
+            payload.allowedNumbers = uniq(payload.allowedNumbers);
+
+            const res = await fetch("/admin/whatsapp/api/config", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token().trim()}`,
+              },
+              body: JSON.stringify(payload),
+            });
+            const js = await res.json();
+            if (!res.ok) throw new Error(js.error || `HTTP ${res.status}`);
+
+            setAllowedNumbers(js.allowedNumbers || payload.allowedNumbers);
+            setPhoneMap(js.phoneMap || payload.phoneMap);
+          } catch (e) {
+            setError(String(e?.message || e));
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        function requireTokenUI() {
+          return (
+            <div class="glass p-4">
+              <div class="mb-2 fw-semibold">Autenticacion</div>
+              <div class="text-secondary small mb-3">
+                Pegá el token admin para editar numeros permitidos.
+              </div>
+              <div class="row g-2 align-items-end">
+                <div class="col-12 col-md-8">
+                  <label class="form-label text-secondary small">Token</label>
+                  <input
+                    class="form-control"
+                    value={token()}
+                    placeholder="Bearer token"
+                    onInput={(e) => setToken(e.currentTarget.value)}
+                  />
+                </div>
+                <div class="col-12 col-md-4">
+                  <button
+                    class="btn btn-primary w-100"
+                    disabled={loading()}
+                    onClick={() => {
+                      const t = token().trim();
+                      if (!t) return setError("Ingresar token");
+                      setTokenToStorage(t);
+                      fetchConfig();
+                    }}
+                  >
+                    Cargar
+                  </button>
+                </div>
+              </div>
+              <Show when={error()}>
+                <div class="alert alert-danger mt-3 mb-0">{error()}</div>
+              </Show>
+            </div>
+          );
+        }
+
+        function numbersUI() {
+          return (
+            <div class="glass p-4">
+              <Show when={error()}>
+                <div class="alert alert-danger mb-3">{error()}</div>
+              </Show>
+
+              <div class="row g-3">
+                <div class="col-12 col-lg-6">
+                  <div class="fw-semibold mb-2">WHATSAPP_ALLOWED_NUMBERS</div>
+                  <div class="text-secondary small mb-3">
+                    Lista de numeros permitidos (se comparan con phone_norm del webhook).
+                  </div>
+
+                  <div class="d-flex gap-2 mb-3">
+                    <input
+                      class="form-control mono"
+                      placeholder="ej: 41794157573"
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        const v = e.currentTarget.value;
+                        const n = normalizeDigits(v);
+                        if (!n) return;
+                        setAllowedNumbers((prev) => uniq([...(prev || []), n]));
+                        e.currentTarget.value = "";
+                      }}
+                    />
+                    <button
+                      class="btn btn-outline-light"
+                      onClick={(e) => {
+                        const inp = e.currentTarget.previousElementSibling;
+                        const v = inp.value;
+                        const n = normalizeDigits(v);
+                        if (!n) return;
+                        setAllowedNumbers((prev) => uniq([...(prev || []), n]));
+                        inp.value = "";
+                      }}
+                      title="Agregar"
+                    >
+                      Agregar
+                    </button>
+                  </div>
+
+                  <div class="d-flex flex-wrap gap-2">
+                    <For each={allowedNumbers()}>
+                      {(n) => (
+                        <div class="badge text-bg-primary p-2 d-flex align-items-center gap-2">
+                          <span class="mono">{n}</span>
+                          <button
+                            type="button"
+                            class="btn btn-sm btn-link text-decoration-none text-light"
+                            onClick={() => setAllowedNumbers((prev) => (prev || []).filter((x) => x !== n))}
+                            aria-label="Eliminar"
+                          >
+                            x
+                          </button>
+                        </div>
+                      )}
+                    </For>
+                    <Show when={allowedNumbers().length === 0}>
+                      <div class="text-secondary small">Sin numeros.</div>
+                    </Show>
+                  </div>
+                </div>
+
+                <div class="col-12 col-lg-6">
+                  <div class="fw-semibold mb-2">WHATSAPP_PHONE_MAP (avanzado)</div>
+                  <div class="text-secondary small mb-3">
+                    Mapea phone_norm (entrada) -> numero real (salida) para evitar exists:false en Evolution.
+                  </div>
+
+                  <div class="d-flex flex-column gap-2">
+                    <For each={phoneMap()}>
+                      {(item, i) => (
+                        <div class="row g-2 align-items-center">
+                          <div class="col-5 col-md-6">
+                            <input
+                              class="form-control mono"
+                              value={item.from}
+                              placeholder="from (entrada)"
+                              onInput={(e) => {
+                                const v = e.currentTarget.value;
+                                setPhoneMap((prev) => prev.map((x, idx) => (idx === i() ? { ...x, from: v } : x)));
+                              }}
+                            />
+                          </div>
+                          <div class="col-5 col-md-5">
+                            <input
+                              class="form-control mono"
+                              value={item.to}
+                              placeholder="to (envio)"
+                              onInput={(e) => {
+                                const v = e.currentTarget.value;
+                                setPhoneMap((prev) => prev.map((x, idx) => (idx === i() ? { ...x, to: v } : x)));
+                              }}
+                            />
+                          </div>
+                          <div class="col-2 col-md-1 text-end">
+                            <button
+                              class="btn btn-outline-light"
+                              onClick={() => setPhoneMap((prev) => prev.filter((_, idx) => idx !== i()))}
+                            >
+                              x
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+
+                  <div class="mt-3">
+                    <button
+                      class="btn btn-outline-light w-100"
+                      onClick={() => setPhoneMap((prev) => uniq([...(prev || []), { from: "", to: "" }].map((x) => x)))}
+                      disabled={loading()}
+                    >
+                      Agregar mapeo
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="d-flex justify-content-end gap-2 mt-4">
+                <button class="btn btn-outline-light" disabled={loading()} onClick={fetchConfig}>
+                  Recargar
+                </button>
+                <button class="btn btn-success" disabled={loading()} onClick={saveConfig}>
+                  Guardar cambios
+                </button>
+              </div>
+
+              <div class="text-secondary small mt-3">
+                Nota: el bridge usa el .env en runtime; este panel recarga la configuracion en memoria.
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div>
+            <Show when={token().trim()}>
+              {numbersUI()}
+            </Show>
+            <Show when={!token().trim()}>
+              {requireTokenUI()}
+            </Show>
+            <Show when={loading()}>
+              <div class="text-center mt-3">
+                <div class="spinner-border text-light" role="status"></div>
+              </div>
+            </Show>
+          </div>
+        );
+      }
+
+      render(() => <App />, document.getElementById("app"));
+    </script>
+  </body>
+</html>
+

@@ -1,7 +1,7 @@
 """
 Jarvis Bot — Asistente de servidor con memoria, logs, voz y Nextcloud.
 
-- Texto y voz: responde con Claude; los mensajes de voz se transcriben con faster_whisper.
+- Texto y voz: responde con Gemini; los mensajes de voz se transcriben con transcripción local o API.
 - Memoria: todo se registra en logs diarios (Markdown). Opcional NEXTCLOUD_DIR para sincronizar.
 - Comandos: /start, /login, /log, /resumen, /proyecto, etc. El menú / se configura al iniciar.
 """
@@ -20,7 +20,6 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import (
@@ -131,8 +130,13 @@ def _audit_log(event: str, detail: str = "", **kwargs) -> None:
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Falta TELEGRAM_TOKEN en .env")
 _has_openclaw = bool(OPENCLAW_USE or OPENCLAW_GATEWAY_WS_URL or OPENCLAW_OPENAI_BASE_URL)
-if not CLAUDE_API_KEY and not _has_openclaw:
-    raise RuntimeError("Falta CLAUDE_API_KEY o configuración OpenClaw (OPENCLAW_GATEWAY_WS_URL / OPENCLAW_OPENAI_BASE_URL) en .env")
+# Backend de texto: preferimos Gemini si está configurado, y OpenClaw como respaldo opcional.
+_has_gemini_text = bool(GEMINI_API_KEY)
+if not _has_openclaw and not _has_gemini_text:
+    raise RuntimeError(
+        "Falta un backend de IA de texto: "
+        "configurá GEMINI_API_KEY o (opcional) OpenClaw (OPENCLAW_GATEWAY_WS_URL / OPENCLAW_OPENAI_BASE_URL) en .env"
+    )
 if not ALLOWED_CHAT_ID:
     raise RuntimeError("Falta ALLOWED_CHAT_ID en .env")
 if not AGENT_SECRET:
@@ -140,7 +144,8 @@ if not AGENT_SECRET:
 if not PROMPT_FILE.exists():
     raise RuntimeError("Falta agent_prompt.txt")
 
-client = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if CLAUDE_API_KEY else None
+# Nombre legible del backend principal de texto (para logs y /start).
+BACKEND_NAME = "Gemini" if _has_gemini_text else "OpenClaw"
 
 auth_until = None
 pending_command = None
@@ -218,28 +223,70 @@ async def search_web(query: str, max_results: int = 6) -> str:
 
 
 def ask_claude(user_text: str, context_memory: str | None = None) -> str:
-    """Envía el mensaje del usuario a Claude con opcional contexto de logs recientes."""
-    if not client:
-        return "(Claude no configurado. Configurá CLAUDE_API_KEY en .env o usá OpenClaw.)"
+    """
+    Claude fue deshabilitado: el bot ahora usa Gemini como backend de texto.
+    Se deja este stub solo por compatibilidad (no se debería llamar).
+    """
+    return "(Claude deshabilitado. Usá GEMINI_API_KEY y el backend de Gemini.)"
+
+
+def ask_gemini(user_text: str, context_memory: str | None = None) -> str:
+    """
+    Envía el mensaje del usuario a Gemini (texto) con opcional contexto de logs recientes.
+    Se usa como backend principal de Jarvis cuando hay GEMINI_API_KEY configurada.
+    """
+    if not GEMINI_API_KEY:
+        return "(Gemini no configurado. Configurá GEMINI_API_KEY en .env.)"
+    try:
+        from google import genai
+    except ImportError as e:
+        return f"(Gemini no disponible, falta dependencia google-genai: {e})"
+
     system_prompt = PROMPT_FILE.read_text(encoding="utf-8")
     if context_memory:
         system_prompt += "\n\n--- CONTEXTO RECIENTE (logs de días anteriores) ---\n" + context_memory
 
     user_message = user_text
     if context_memory:
-        user_message = "[El usuario tiene acceso a logs diarios. Usá NOTA: para apuntes y proponé comandos con ACCION:/CMD: cuando haga falta.]\n\n" + user_message
+        user_message = (
+            "[El usuario tiene acceso a logs diarios. Usá NOTA: para apuntes y proponé comandos con ACCION:/CMD: "
+            "cuando haga falta. Respetá siempre el formato de acciones ya definido para Jarvis.]\n\n"
+            + user_message
+        )
 
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=800,
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": user_message}
-        ],
-    )
-    if not response.content or not response.content[0].text:
-        return "(Claude no devolvió texto)"
-    return response.content[0].text.strip()
+    client_gemini = genai.Client(api_key=GEMINI_API_KEY)
+    # Algunos modelos históricos pueden devolver 404 para nuevas cuentas.
+    # Probamos el modelo configurado y, si falla, intentamos alternativas.
+    primary = os.getenv("GEMINI_TEXT_MODEL", "").strip() or "gemini-1.5-flash"
+    fallbacks = [
+        primary,
+        "gemini-1.5-flash-002",
+        "gemini-1.5-pro",
+        "gemini-2.5-flash",
+    ]
+
+    last_error = None
+    for model_name in fallbacks:
+        try:
+            response = client_gemini.models.generate_content(
+                model=model_name,
+                contents=[{"role": "user", "parts": [{"text": user_message}]}],
+                config={"system_instruction": system_prompt},
+            )
+            # La API de Gemini puede devolver varias partes; tomamos el texto agregado.
+            text = (response.text or "").strip()
+            if text:
+                return text
+            return "(Gemini no devolvió texto)"
+        except Exception as e:
+            last_error = e
+            msg = str(e).lower()
+            if "404" in msg or "not_found" in msg or "no longer available" in msg:
+                continue
+            continue
+
+    err = str(last_error)[:500] if last_error else "error desconocido"
+    return f"(Error Gemini: {err})"
 
 
 def _openclaw_configured() -> bool:
@@ -249,19 +296,28 @@ def _openclaw_configured() -> bool:
 
 async def get_ai_response(user_text: str, context_memory: str | None = None) -> str:
     """
-    Obtiene la respuesta de IA: usa OpenClaw si está configurado, si no Claude.
-    Async para no bloquear cuando se usa OpenClaw (SDK async).
+    Obtiene la respuesta de IA para texto.
+    Prioridad:
+      1) Gemini si hay GEMINI_API_KEY.
+      2) OpenClaw si está configurado.
+    Async para no bloquear cuando se usa OpenClaw (SDK async) o backends síncronos.
     """
+    if _has_gemini_text:
+        return await asyncio.to_thread(ask_gemini, user_text, context_memory)
+
     if _openclaw_configured():
         try:
             from openclaw_sdk import OpenClawClient
 
-            # Construir mensaje como para Claude (contexto + instrucciones opcionales)
+            # Construir mensaje con contexto para compatibilidad con despliegues previos.
             user_message = user_text
             if context_memory:
                 user_message = (
                     "[El usuario tiene acceso a logs diarios. Usá NOTA: para apuntes y proponé comandos con ACCION:/CMD: cuando haga falta.]\n\n"
-                    "--- CONTEXTO RECIENTE ---\n" + context_memory + "\n\n--- MENSAJE ---\n" + user_text
+                    "--- CONTEXTO RECIENTE ---\n"
+                    + context_memory
+                    + "\n\n--- MENSAJE ---\n"
+                    + user_text
                 )
             # Conexión: URL explícita o auto-detect (gateway local 127.0.0.1:18789)
             kwargs = {}
@@ -280,12 +336,12 @@ async def get_ai_response(user_text: str, context_memory: str | None = None) -> 
         except ImportError:
             logger.warning(
                 "OpenClaw está activo pero openclaw-sdk no está instalado. "
-                "Ejecutá: pip install -r requirements-openclaw.txt. Usando Claude."
+                "Ejecutá: pip install -r requirements-openclaw.txt."
             )
         except Exception as e:
-            logger.warning("Error al usar OpenClaw (%s), fallback a Claude: %s", type(e).__name__, e)
-    # Claude (sync en thread para no bloquear)
-    return await asyncio.to_thread(ask_claude, user_text, context_memory)
+            logger.warning("Error al usar OpenClaw (%s): %s", type(e).__name__, e)
+
+    return "(No hay backend de IA de texto disponible: configurá GEMINI_API_KEY o (opcional) OpenClaw.)"
 
 
 def run_command(command: str) -> str:
@@ -448,7 +504,7 @@ def list_log_dates() -> list[str]:
 
 
 def get_recent_logs_for_context(days: int = 3, max_chars: int = 3500) -> str:
-    """Get recent logs content for Claude context, truncated to max_chars."""
+    """Get recent logs content for Gemini/OpenClaw context, truncated to max_chars."""
     parts = []
     total = 0
     today = datetime.now().date()
@@ -540,7 +596,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🤖 Jarvis activo (Claude). Podés pedirme cambios en el servidor: ejecutar comandos, crear/editar archivos, instalar, reiniciar servicios, etc. Confirmo con /confirm.\n\n"
+        f"🤖 Jarvis activo ({BACKEND_NAME}). Podés pedirme cambios en el servidor: ejecutar comandos, crear/editar archivos, instalar, reiniciar servicios, etc. Confirmo con /confirm.\n\n"
         "Comandos:\n"
         "/login TU_CLAVE · /authstatus · /estado\n"
         "/confirm CODIGO · /cancel\n\n"
@@ -550,7 +606,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Generar:\n"
         "/audio <texto> · /imagen <descripción> · /editarimagen <instrucción>\n"
         "/buscar <consulta>\n\n"
-        "Voz: /cambiargemini (alternar respuesta con Gemini o Claude)\n\n"
+        "Voz: /cambiargemini (alternar respuesta de voz con Gemini Live o modo normal)\n\n"
         "Productos (DRR): /productos"
     )
 
@@ -874,7 +930,7 @@ async def cmd_imagen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # =========================
 
 async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Busca en internet y responde con Claude. Uso: /buscar qué querés buscar"""
+    """Busca en internet y responde usando el backend de texto (Gemini). Uso: /buscar qué querés buscar"""
     if not is_authorized(update):
         await update.message.reply_text("⛔ chat no autorizado")
         return
@@ -903,7 +959,7 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_cambiargemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Alterna entre respuesta de voz con Gemini Live y el flujo normal (Claude + transcripción + TTS)."""
+    """Alterna entre voz con Gemini Live y el flujo normal (transcripción + respuesta con Gemini + TTS)."""
     if not is_authorized(update):
         await update.message.reply_text("⛔ chat no autorizado")
         return
@@ -920,12 +976,12 @@ async def cmd_cambiargemini(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(
             "✅ Cambiaste a Gemini para la voz.\n\n"
             "A partir de ahora, cuando envíes un mensaje de voz, te responderé con la voz de Gemini (Live API). "
-            "Para volver al modo normal (Claude + transcripción + TTS), escribí /cambiargemini de nuevo o «volver a Claude»."
+            "Para volver al modo normal, escribí /cambiargemini de nuevo."
         )
     else:
         await update.message.reply_text(
-            "✅ Volviste al modo normal (Claude + transcripción + TTS).\n\n"
-            "Los mensajes de voz se transcriben y Claude responde; si pedís audio, se genera con TTS. "
+            "✅ Volviste al modo normal (transcripción + Gemini + TTS).\n\n"
+            "Los mensajes de voz se transcriben y Gemini responde; si pedís audio, se genera con TTS. "
             "Para usar de nuevo la voz de Gemini, escribí /cambiargemini o «cambiar a Gemini»."
         )
 
@@ -985,6 +1041,191 @@ def _build_drr_zero_log(servicio, descripcion: str | None, codigo_barras: str | 
         lines.append(f"From cache: {info.get('from_cache', False)}")
     lines.append(f"Timestamp: {datetime.now().isoformat()}")
     return "\n".join(lines)
+
+
+def _parse_product_prefs_from_user_text(user_text: str) -> dict:
+    """
+    Interpreta preferencias de filtros para DRR desde el texto del usuario (Telegram o transcripción).
+
+    Devuelve dict con claves:
+      - limit (int | None)
+      - include_prices (bool | None)
+      - order ("last_modified_desc" | "last_modified_asc" | None)
+    """
+    t = (user_text or "").lower()
+
+    # Cantidad (solo números). Si viene en palabras (p.ej. "cinco") lo dejamos a la IA / reply.
+    limit = None
+    m = re.search(r"(?:^|\b)(\d{1,3})\s*(?:productos|producto)\b", t)
+    if not m:
+        m = re.search(r"(?:traeme|dame|ponme|llévame)\s*(\d{1,3})\b", t)
+    if m:
+        try:
+            limit = int(m.group(1))
+        except Exception:
+            limit = None
+
+    include_prices = None
+    if "sin precio" in t or "sin precios" in t or "no precio" in t:
+        include_prices = False
+    elif "con precio" in t or "con precios" in t or "con los precios" in t:
+        include_prices = True
+    elif "precio" in t and "sin precio" not in t and "sin precios" not in t:
+        # Si menciona "precio" sin negar explícitamente, asumimos que los quiere.
+        include_prices = True
+
+    order = None
+    wants_last_modified = any(
+        kw in t
+        for kw in (
+            "ultima modific",
+            "última modific",
+            "ultima actualiz",
+            "última actualiz",
+            "fecha",
+            "recientes",
+            "más recientes",
+            "ultimos",
+            "últimos",
+        )
+    )
+    if wants_last_modified:
+        order = "last_modified_desc"
+        if any(kw in t for kw in ("asc", "viejos", "más viejos", "antigu")):
+            order = "last_modified_asc"
+
+    return {"limit": limit, "include_prices": include_prices, "order": order}
+
+
+def _extract_last_modified_dt(extra: dict) -> datetime | None:
+    """
+    Intenta extraer una fecha de última modificación desde campos extra del Producto (DRR).
+    """
+    if not isinstance(extra, dict):
+        return None
+
+    candidate_keys = (
+        "fechaultimamodificacion",
+        "ultimamodificacion",
+        "fechaultimaactualizacion",
+        "ultimaactualizacion",
+        "lastmodified",
+        "modifiedat",
+        "updatedat",
+        "updated_at",
+        "fechamodificacion",
+        "fecha_actualizacion",
+        "fecha_actualizada",
+    )
+
+    value = None
+    extra_lower = {str(k).lower(): k for k in extra.keys()}
+    for ck in candidate_keys:
+        real_key = extra_lower.get(ck)
+        if real_key is None:
+            continue
+        v = extra.get(real_key)
+        if v not in (None, ""):
+            value = v
+            break
+
+    # Si no encontramos, hacemos match heurístico por nombre de clave.
+    if value is None:
+        for k, v in extra.items():
+            if v in (None, ""):
+                continue
+            kl = str(k).lower()
+            if "ultima" in kl and ("modif" in kl or "actualiz" in kl or "update" in kl):
+                value = v
+                break
+            if "last" in kl and ("modif" in kl or "modified" in kl or "update" in kl):
+                value = v
+                break
+            if ("modified" in kl or "updated" in kl) and "at" in kl:
+                value = v
+                break
+
+    if value is None:
+        return None
+
+    try:
+        # Epoch seconds.
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value))
+        s = str(value).strip()
+        if not s:
+            return None
+        # ISO (con o sin Z).
+        s = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        pass
+
+    # Formatos alternativos comunes: DD/MM/YYYY o MM/DD/YYYY
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(value).strip(), fmt)
+        except Exception:
+            continue
+
+    return None
+
+
+def _sort_products_by_last_modified(productos: list, order: str) -> list:
+    reverse = order == "last_modified_desc"
+
+    def _key(p):
+        dt = _extract_last_modified_dt(getattr(p, "extra", None) or {})
+        # None al final.
+        return dt or (datetime.min if reverse else datetime.max)
+
+    try:
+        return sorted(productos, key=_key, reverse=reverse)
+    except Exception:
+        return productos
+
+
+def _get_productos(
+    descripcion: str = "",
+    limit: int = 5,
+    *,
+    include_prices: bool = True,
+    order: str | None = None,
+) -> str:
+    """Consulta la API DRR y devuelve productos formateados (con filtros)."""
+    if not DRR_API_BASE_URL:
+        return "(DRR no configurado)"
+    try:
+        from drr.api_client import DRRProductoAPIClient
+
+        repo = DRRProductoAPIClient(DRR_API_BASE_URL, api_key=DRR_API_KEY or None, cache_ttl_seconds=25)
+        # Si ordenamos localmente por fecha, necesitamos traer más de "limit" para que el
+        # "top N" por fecha sea correcto (si el backend no soporta order explícito).
+        fetch_limit = limit if order is None else max(limit, 50)
+        productos = repo.listar(descripcion=descripcion or None, limit=fetch_limit)
+        if not productos:
+            return f"(Sin productos encontrados para: {descripcion or 'todos'})"
+
+        total = len(productos)
+        out_list = productos
+        if order in ("last_modified_desc", "last_modified_asc"):
+            out_list = _sort_products_by_last_modified(productos, order)
+
+        lines = []
+        for p in out_list[:limit]:
+            linea = f"• {p.descripcion}"
+            if p.codigo_barras:
+                linea += f" | Cód: {p.codigo_barras}"
+            if include_prices and p.precio is not None:
+                linea += f" | ${p.precio:.2f}"
+            lines.append(linea)
+
+        result = "\n".join(lines)
+        if total > limit:
+            result += f"\n_(mostrando {limit} de {total})_"
+        return result
+    except Exception as e:
+        return f"(Error DRR: {e})"
 
 
 def _download_image_bytes(url: str) -> bytes | None:
@@ -1468,7 +1709,7 @@ async def _process_user_message(
 ) -> None:
     """
     Procesa un mensaje del usuario (texto o transcripción de voz): loguea, pide contexto
-    a Claude, responde y registra todo en el log diario. NOTA/CMD se manejan igual.
+    a Gemini, responde y registra todo en el log diario. NOTA/CMD se manejan igual.
     """
     global pending_command, pending_code
 
@@ -1476,7 +1717,7 @@ async def _process_user_message(
         return
 
     # =========================
-    # OPCIÓN "cambiar a gemini" / "volver a claude" por texto
+    # OPCIÓN "cambiar a gemini" / "volver a modo normal" por texto
     # =========================
     t_lower = text.strip().lower()
     if re.search(r"cambiar(s)?\s+a\s+gemini|usar\s+gemini\s+para\s+voz|gemini\s+para\s+voz", t_lower):
@@ -1485,15 +1726,15 @@ async def _process_user_message(
             context.user_data[USE_GEMINI_VOICE_KEY] = False
             await update.message.reply_text("❌ No está configurada GEMINI_API_KEY. Añadila al .env para usar voz con Gemini.")
         else:
-            await update.message.reply_text("✅ Cambiaste a Gemini para la voz. Enviá un mensaje de voz y te responderé con la voz de Gemini. Para volver: «volver a Claude» o /cambiargemini.")
+            await update.message.reply_text("✅ Cambiaste a Gemini para la voz. Enviá un mensaje de voz y te responderé con la voz de Gemini. Para volver al modo normal: /cambiargemini.")
         append_log("user", text.strip())
         append_log("assistant", "Usuario activó voz con Gemini.")
         return
     if re.search(r"volver\s+a\s+claude|cambiar(s)?\s+a\s+claude|desactivar\s+gemini\s+voz", t_lower):
         context.user_data[USE_GEMINI_VOICE_KEY] = False
-        await update.message.reply_text("✅ Volviste al modo normal (Claude + transcripción + TTS).")
+        await update.message.reply_text("✅ Volviste al modo normal (transcripción + Gemini + TTS).")
         append_log("user", text.strip())
-        append_log("assistant", "Usuario volvió a Claude para voz.")
+        append_log("assistant", "Usuario volvió al modo normal para voz.")
         return
 
     # =========================
@@ -1575,6 +1816,58 @@ async def _process_user_message(
             path = save_note(note_text)
             append_log("assistant", f"Nota guardada: {note_text}", entry_type="nota")
             await update.message.reply_text(f"📝 Nota guardada en:\n{path}\n\n{note_text}")
+            return
+
+        # DRR PRODUCTOS: el modelo debe devolver una línea con "PRODUCTOS: descripcion | cantidad".
+        # A veces aparece con typo ("PRODUOTOS") y/o espacios: lo toleramos.
+        first_line = response.strip().splitlines()[0].strip() if response.strip() else ""
+        first_line_clean = first_line.replace("```", "").strip()
+        m_prod = re.match(
+            r"^(PRODUCTOS|PRODUOTOS)\s*:\s*(.*)\s*$",
+            first_line_clean,
+            flags=re.IGNORECASE,
+        )
+        if m_prod:
+            query = (m_prod.group(2) or "").strip()
+            try:
+                limit = 5
+                parts = query.split("|")
+                desc = parts[0].strip()
+                if len(parts) > 1 and parts[1].strip().isdigit():
+                    limit = min(int(parts[1].strip()), 20)
+            except Exception:
+                desc = query
+                limit = 5
+
+            prefs = _parse_product_prefs_from_user_text(text)
+            final_limit = prefs.get("limit") if prefs.get("limit") is not None else limit
+            final_include_prices = prefs.get("include_prices")
+            if final_include_prices is None:
+                final_include_prices = True
+            final_order = prefs.get("order")
+
+            logger.info(
+                "[%s] DRR filtros (from Telegram): desc=%r limit=%s include_prices=%s order=%r",
+                update.effective_chat.id if update.effective_chat else "unknown",
+                desc,
+                final_limit,
+                final_include_prices,
+                final_order,
+            )
+            append_log(
+                "sistema",
+                f"DRR filtros (Telegram): desc={desc!r} limit={final_limit} include_prices={final_include_prices} order={final_order!r}",
+            )
+
+            await update.message.reply_text(f"📦 Buscando productos: {desc or 'todos'} (limit={final_limit})...")
+            resultado = _get_productos(
+                descripcion=desc,
+                limit=final_limit,
+                include_prices=final_include_prices,
+                order=final_order,
+            )
+            append_log("assistant", f"PRODUCTOS => {resultado[:200]}", entry_type="producto")
+            await update.message.reply_text(f"📦 Productos DRR:\n{resultado}"[:4000])
             return
 
         if "BUSCAR_IMAGEN:" in response:
@@ -2072,7 +2365,7 @@ def main():
             BotCommand("imagen", "Generar imagen con IA"),
             BotCommand("editarimagen", "Editar última imagen con Gemini (Nanobanana)"),
             BotCommand("buscar", "Buscar en internet"),
-            BotCommand("cambiargemini", "Cambiar a Gemini para voz / volver a Claude"),
+            BotCommand("cambiargemini", "Cambiar a Gemini para voz / volver a modo normal"),
             BotCommand("productos", "DRR: consultar productos, imágenes"),
         ])
         logger.info("Menú de comandos (/) actualizado en Telegram.")
@@ -2115,8 +2408,7 @@ def main():
                 pass
 
     app.add_error_handler(on_error)
-    backend = "OpenClaw" if _openclaw_configured() else "Claude"
-    logger.info("Jarvis bot iniciado (IA: %s). Esperando mensajes (ALLOWED_CHAT_ID=%s)...", backend, ALLOWED_CHAT_ID)
+    logger.info("Jarvis bot iniciado (IA: %s). Esperando mensajes (ALLOWED_CHAT_ID=%s)...", BACKEND_NAME, ALLOWED_CHAT_ID)
     try:
         # message + callback_query para recibir mensajes y pulsaciones en botones inline (productos, imágenes)
         app.run_polling(drop_pending_updates=True, allowed_updates=["message", "callback_query"])
