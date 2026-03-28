@@ -8,6 +8,7 @@
       href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
       rel="stylesheet"
     />
+    <!-- QR_WEB_PUBLIC_URL_INJECT -->
     <style>
       body {
         background: radial-gradient(circle at 10% 10%, #1f2a44 0%, #0b1220 55%, #070b14 100%);
@@ -33,18 +34,702 @@
   <body class="text-light">
     <div class="container py-4">
       <div class="panel mx-auto">
-        <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
           <div>
             <div class="fw-semibold fs-5">Jarvis WhatsApp - Panel de Numeros</div>
             <div class="text-secondary small">Admin para WHATSAPP_ALLOWED_NUMBERS y WHATSAPP_PHONE_MAP</div>
           </div>
-          <div class="text-secondary small mono">/admin/whatsapp</div>
+          <div class="d-flex align-items-center flex-wrap gap-2">
+            <a
+              id="qrEvolutionLink"
+              href="#evolution-qr-embedded"
+              class="btn btn-sm btn-outline-info"
+              title="Baja a la seccion QR en esta misma pagina. Opcional: QR_WEB_PUBLIC_URL en .env para abrir otra URL."
+            >
+              QR y cerrar sesion (Evolution)
+            </a>
+            <div class="text-secondary small mono">/admin/whatsapp</div>
+          </div>
         </div>
 
         <div id="app"></div>
+
+        <div id="evolution-qr-embedded" class="glass p-4 mt-3">
+          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
+            <div class="fw-semibold">Evolution — Vincular WhatsApp</div>
+            <span class="text-secondary small">Actualizacion cada 2s</span>
+          </div>
+          <p class="text-secondary small mb-3">
+            Todo desde esta misma pagina: no hace falta otra pestaña ni la terminal. Escané el codigo desde WhatsApp → Dispositivos vinculados.
+          </p>
+          <!-- WHATSAPP_DEBUG_LOG_INJECT -->
+          <div id="evoQrBox" style="min-height: 220px; display: grid; place-items: center"></div>
+          <p id="evoQrStatus" class="small mt-2 text-secondary"></p>
+          <p id="evoQrPair" class="small text-info"></p>
+          <hr class="border-secondary opacity-25 my-3" />
+          <label class="form-label text-secondary small" for="evoLogoutTok">
+            Cerrar sesion en Evolution — clave <strong>AGENT_SECRET</strong> del <code class="mono">.env</code> del servidor (no es el token Bearer del panel de arriba, salvo que hayas puesto el mismo valor en ambos)
+          </label>
+          <input
+            type="password"
+            id="evoLogoutTok"
+            class="form-control"
+            autocomplete="off"
+            placeholder="Mismo valor que AGENT_SECRET en .env"
+          />
+          <label class="form-label text-secondary small mt-2 mb-1" for="evoInstanceName">
+            Opcional — nombre de la instancia en <strong>Evolution</strong> (si no coincide con el .env del servidor)
+          </label>
+          <input
+            type="text"
+            id="evoInstanceName"
+            class="form-control font-monospace"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="ej. jarvis — dejá vacío para usar la del servidor"
+          />
+          <button type="button" class="btn btn-outline-info btn-sm w-100 mt-2" id="evoSessionsBtn">
+            Ver sesiones / instancias en Evolution (cual esta open)
+          </button>
+          <pre
+            id="evoSessionsOut"
+            class="mono small text-info mt-2 mb-0 p-2 rounded"
+            style="
+              display: none;
+              max-height: 220px;
+              overflow: auto;
+              white-space: pre-wrap;
+              word-break: break-word;
+              background: rgba(0, 0, 0, 0.35);
+              border: 1px solid rgba(255, 255, 255, 0.12);
+            "
+          ></pre>
+          <button type="button" class="btn btn-danger w-100 mt-2" id="evoLogoutBtn">Cerrar sesion y pedir QR nuevo</button>
+          <p id="evoLogoutMsg" class="small mt-2 text-secondary"></p>
+          <button type="button" class="btn btn-outline-light btn-sm w-100 mt-2" id="evoDiagBtn">
+            Ver diagnostico reciente (misma clave AGENT_SECRET)
+          </button>
+          <pre
+            id="evoDiagOut"
+            class="mono small text-warning mt-2 mb-0 p-2 rounded"
+            style="
+              display: none;
+              max-height: 320px;
+              overflow: auto;
+              white-space: pre-wrap;
+              word-break: break-word;
+              background: rgba(0, 0, 0, 0.35);
+              border: 1px solid rgba(255, 255, 255, 0.12);
+            "
+          ></pre>
+          <div class="form-check form-switch mt-3 mb-2">
+            <input class="form-check-input" type="checkbox" id="evoAutoLogOn" checked />
+            <label class="form-check-label text-secondary small" for="evoAutoLogOn">
+              <strong>Log automático</strong> — se alimenta solo (acciones en esta página + servidor si el bridge está
+              actualizado). Sobrevive recargas en este navegador.
+            </label>
+          </div>
+          <pre
+            id="evoAutoFeedLog"
+            class="mono small text-light mt-1 mb-1 p-2 rounded"
+            style="
+              display: block;
+              max-height: 360px;
+              overflow: auto;
+              white-space: pre-wrap;
+              word-break: break-word;
+              background: rgba(0, 20, 40, 0.55);
+              border: 1px solid rgba(13, 110, 253, 0.35);
+              font-size: 11px;
+            "
+          ></pre>
+          <button type="button" class="btn btn-link btn-sm text-secondary p-0 mt-1" id="evoClearClientLog">
+            Vaciar solo el log del navegador
+          </button>
+        </div>
       </div>
     </div>
 
+    <script>
+      (function () {
+        var el = document.getElementById("qrEvolutionLink");
+        if (!el) return;
+        var base =
+          typeof window.__QR_WEB_PUBLIC_URL__ === "string" && window.__QR_WEB_PUBLIC_URL__.trim()
+            ? window.__QR_WEB_PUBLIC_URL__.trim()
+            : "";
+        if (base) {
+          el.href = base;
+          el.target = "_blank";
+          el.rel = "noopener noreferrer";
+        } else {
+          el.href = "#evolution-qr-embedded";
+          el.removeAttribute("target");
+          el.addEventListener("click", function (e) {
+            var sec = document.getElementById("evolution-qr-embedded");
+            if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+          });
+        }
+      })();
+    </script>
+    <script>
+      (function () {
+        var ORIGIN = typeof window !== "undefined" && window.location && window.location.origin ? window.location.origin : "";
+        function absUrl(path) {
+          if (!path) return path;
+          if (path.indexOf("http://") === 0 || path.indexOf("https://") === 0) return path;
+          if (path.charAt(0) === "/") return ORIGIN + path;
+          return path;
+        }
+        var API = ORIGIN + "/admin/whatsapp/api";
+        var CLIENT_LOG_KEY = "jarvis_whatsapp_client_log_v1";
+        var CLIENT_LOG_MAX = 150;
+        var clientLogLines = [];
+        var lastServerEvents = null;
+        function safeStr(x, maxLen) {
+          maxLen = maxLen || 500;
+          try {
+            var s = typeof x === "string" ? x : JSON.stringify(x);
+            return s.length > maxLen ? s.slice(0, maxLen) + "…" : s;
+          } catch (e0) {
+            return String(x).slice(0, maxLen);
+          }
+        }
+        function loadClientLogFromStorage() {
+          try {
+            var s = sessionStorage.getItem(CLIENT_LOG_KEY);
+            if (s) {
+              var a = JSON.parse(s);
+              if (Array.isArray(a)) clientLogLines = a.slice(-CLIENT_LOG_MAX);
+            }
+          } catch (e0) {}
+        }
+        function persistClientLog() {
+          try {
+            sessionStorage.setItem(CLIENT_LOG_KEY, JSON.stringify(clientLogLines.slice(-CLIENT_LOG_MAX)));
+          } catch (e0) {}
+        }
+        function pushClientLog(category, detail) {
+          var line = {
+            t: new Date().toISOString(),
+            c: category,
+            d: typeof detail === "string" ? detail : safeStr(detail, 400),
+          };
+          clientLogLines.push(line);
+          if (clientLogLines.length > CLIENT_LOG_MAX) clientLogLines.shift();
+          persistClientLog();
+          renderAutoFeed();
+        }
+        function renderAutoFeed() {
+          var pre = document.getElementById("evoAutoFeedLog");
+          if (!pre) return;
+          var lines = [];
+          lines.push("── Log auto — " + new Date().toLocaleString() + " ──");
+          lines.push("[Navegador] últimas " + clientLogLines.length + " entradas (sin token ni secretos en URL):");
+          var start = Math.max(0, clientLogLines.length - 45);
+          for (var li = start; li < clientLogLines.length; li++) {
+            var x = clientLogLines[li];
+            lines.push(x.t + " | " + x.c + " | " + x.d);
+          }
+          if (lastServerEvents && lastServerEvents.length) {
+            lines.push("");
+            lines.push("[Servidor] últimos eventos del bridge (" + lastServerEvents.length + "):");
+            lines.push(safeStr(lastServerEvents.slice(-30), 12000));
+          } else {
+            lines.push("");
+            lines.push(
+              "[Servidor] aún no hay eventos (404 = subí código nuevo y reiniciá jarvis-whatsapp-bridge). El log del navegador igual registra cada HTTP."
+            );
+          }
+          pre.textContent = lines.join("\n");
+          pre.scrollTop = pre.scrollHeight;
+        }
+        loadClientLogFromStorage();
+        async function tickAutoFeed() {
+          var chk = document.getElementById("evoAutoLogOn");
+          if (chk && !chk.checked) {
+            renderAutoFeed();
+            return;
+          }
+          var tok = ((document.getElementById("evoLogoutTok") || {}).value || "").trim();
+          var pingS = "?";
+          try {
+            var pr = await fetch(absUrl("/j/ping"), { cache: "no-store" });
+            if (pr.status === 404) {
+              pr = await fetch(absUrl("/admin/whatsapp?wa_json=1&wa_op=ping"), { cache: "no-store" });
+            }
+            pingS = String(pr.status);
+          } catch (eP) {
+            pingS = "err";
+          }
+          var da = "-";
+          var dj = "-";
+          var df = "-";
+          if (tok) {
+            try {
+              var r1 = await fetch(absUrl("/admin/whatsapp/api/debug-events"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: tok, limit: 100 }),
+                cache: "no-store",
+              });
+              da = String(r1.status);
+              var j1 = null;
+              try {
+                j1 = await r1.json();
+              } catch (eA) {
+                j1 = null;
+              }
+              if (j1 && j1.ok && j1.events) lastServerEvents = j1.events;
+              if (r1.status === 404) {
+                var r1b = await fetch(absUrl("/admin/whatsapp"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ wa_op: "debug-events", token: tok, limit: 100 }),
+                  cache: "no-store",
+                });
+                df = String(r1b.status);
+                try {
+                  j1 = await r1b.json();
+                } catch (eA2) {
+                  j1 = null;
+                }
+                if (j1 && j1.ok && j1.events) lastServerEvents = j1.events;
+              }
+            } catch (e1) {
+              da = "err";
+            }
+            if (!lastServerEvents || !lastServerEvents.length) {
+              try {
+                var r2 = await fetch(absUrl("/j/debug-events"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ token: tok, limit: 100 }),
+                  cache: "no-store",
+                });
+                dj = String(r2.status);
+                var j2 = null;
+                try {
+                  j2 = await r2.json();
+                } catch (eB) {
+                  j2 = null;
+                }
+                if (j2 && j2.ok && j2.events) lastServerEvents = j2.events;
+              } catch (e2) {
+                dj = "err";
+              }
+            }
+          }
+          var summary =
+            "auto | ping=" +
+            pingS +
+            " | debug_api=" +
+            da +
+            " | debug_fallback_post=" +
+            df +
+            " | debug_j=" +
+            dj +
+            (tok ? "" : " | (sin AGENT_SECRET no se pide debug servidor)");
+          if (pingS === "404" && da === "404" && dj === "404" && df === "404") {
+            summary += " → todo 404: proceso en :8766 no es este bridge; redeploy.";
+          } else if (pingS === "404" || (da === "404" && df === "404")) {
+            summary += " → si ping ok pero debug 404, probá redeploy igual.";
+          }
+          pushClientLog("auto_tick", summary);
+        }
+        async function loadDiagnostics(tok, preEl) {
+          var out = preEl || document.getElementById("evoDiagOut");
+          if (!out) return;
+          if (!tok) {
+            out.style.display = "block";
+            out.textContent = "Ingresá AGENT_SECRET arriba y volvé a intentar.";
+            return;
+          }
+          out.style.display = "block";
+          out.textContent = "Cargando…";
+          var endpoints = [absUrl("/admin/whatsapp/api/debug-events"), absUrl("/j/debug-events")];
+          try {
+            var lastLine = "";
+            for (var ei = 0; ei < endpoints.length; ei++) {
+              var r = await fetch(endpoints[ei], {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: tok, limit: 100 }),
+                cache: "no-store",
+              });
+              var j = null;
+              try {
+                j = await r.json();
+              } catch (e1) {
+                j = null;
+              }
+              var epPath = endpoints[ei].split("?")[0].replace(/^https?:\/\/[^/]+/, "");
+              pushClientLog("diag_manual", epPath + " HTTP " + r.status);
+              if (r.status === 404) {
+                var rb = await fetch(absUrl("/admin/whatsapp"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ wa_op: "debug-events", token: tok, limit: 100 }),
+                  cache: "no-store",
+                });
+                pushClientLog("diag_fallback", "POST /admin/whatsapp debug-events HTTP " + rb.status);
+                try {
+                  j = await rb.json();
+                } catch (e1b) {
+                  j = null;
+                }
+                r = rb;
+                if (j && j.ok) {
+                  lastServerEvents = j.events || [];
+                  out.textContent = JSON.stringify(j.events || [], null, 2);
+                  renderAutoFeed();
+                  return;
+                }
+                lastLine = "HTTP 404 en " + epPath + " — probando /j/debug-events.";
+                continue;
+              }
+              if (j && j.ok) {
+                lastServerEvents = j.events || [];
+                out.textContent = JSON.stringify(j.events || [], null, 2);
+                renderAutoFeed();
+                return;
+              }
+              if (j && j.detail) {
+                out.textContent = j.detail + " (HTTP " + r.status + ")";
+                renderAutoFeed();
+                return;
+              }
+            }
+            out.textContent =
+              lastLine ||
+              "No se pudo cargar el diagnostico. Abrí en el navegador: " + absUrl("/j/ping") + " — si tambien da 404, el servidor no tiene el bridge actualizado.";
+            pushClientLog("diag_manual", "sin datos del servidor");
+            renderAutoFeed();
+          } catch (e) {
+            out.textContent = String(e);
+            pushClientLog("diag_manual_err", String(e));
+          }
+        }
+        async function loadEvolutionSessions(tok) {
+          var out = document.getElementById("evoSessionsOut");
+          if (!out) return;
+          if (!tok) {
+            out.style.display = "block";
+            out.textContent = "Ingresá AGENT_SECRET arriba.";
+            return;
+          }
+          out.style.display = "block";
+          out.textContent = "Consultando Evolution…";
+          var urls = [API + "/evolution-instances", absUrl("/j/instances")];
+          try {
+            var note = "";
+            for (var si = 0; si < urls.length; si++) {
+              var r = await fetch(urls[si], {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ token: tok }),
+                cache: "no-store",
+              });
+              var j = null;
+              try {
+                j = await r.json();
+              } catch (e2) {
+                j = null;
+              }
+              var up = urls[si].split("?")[0].replace(/^https?:\/\/[^/]+/, "");
+              pushClientLog("sessions", up + " HTTP " + r.status);
+              if (r.status === 404) {
+                var rs = await fetch(absUrl("/admin/whatsapp"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ wa_op: "evolution-instances", token: tok }),
+                  cache: "no-store",
+                });
+                pushClientLog("sessions_fb", "POST /admin/whatsapp instances HTTP " + rs.status);
+                try {
+                  j = await rs.json();
+                } catch (e2b) {
+                  j = null;
+                }
+                if (j && j.ok) {
+                  out.textContent = JSON.stringify(j, null, 2);
+                  renderAutoFeed();
+                  return;
+                }
+                note = "404 en " + up + ". ";
+                continue;
+              }
+              if (j && j.ok) {
+                out.textContent = JSON.stringify(j, null, 2);
+                renderAutoFeed();
+                return;
+              }
+              if (j) {
+                out.textContent = JSON.stringify(j, null, 2) + "\n(HTTP " + r.status + ")";
+                return;
+              }
+            }
+            out.textContent =
+              note +
+              "No se pudo listar. Comproba en el servidor que Evolution este en marcha y que EVOLUTION_API_URL / KEY en el .env del bridge apunten bien.";
+          } catch (e) {
+            out.textContent = String(e);
+          }
+        }
+        async function refreshQr() {
+          var box = document.getElementById("evoQrBox");
+          var st = document.getElementById("evoQrStatus");
+          var pair = document.getElementById("evoQrPair");
+          if (!box) return;
+          try {
+            var r = await fetch(API + "/evolution-qr", { cache: "no-store" });
+            if (r.status === 404) {
+              r = await fetch(absUrl("/admin/whatsapp?wa_json=1&wa_op=evolution-qr"), { cache: "no-store" });
+            }
+            pushClientLog("qr", "/evolution-qr HTTP " + r.status);
+            var j = await r.json();
+            if (j.base64) {
+              box.innerHTML =
+                '<img src="' +
+                String(j.base64).replace(/"/g, "&quot;") +
+                '" alt="QR WhatsApp" class="img-fluid rounded" style="max-width: 320px; background: #fff; padding: 10px" />';
+              st.textContent = j.hint || "Escaneá con WhatsApp.";
+              st.className = "small mt-2 text-success";
+            } else {
+              box.innerHTML = '<p class="text-secondary mb-0">' + (j.hint || "Sin QR (¿ya vinculado?)") + "</p>";
+              st.textContent = "";
+            }
+            pair.textContent = j.pairingCode ? "Codigo: " + j.pairingCode : "";
+            if (j.error) {
+              st.innerHTML = '<span class="text-danger">' + j.error + "</span>";
+              st.className = "small mt-2";
+            }
+          } catch (e) {
+            pushClientLog("qr_err", String(e));
+            box.innerHTML =
+              '<p class="text-danger mb-0">No se pudo cargar el QR desde el servidor. Reintentá en unos segundos o avisá al administrador.</p>';
+          }
+        }
+        var btn = document.getElementById("evoLogoutBtn");
+        if (btn) {
+          btn.addEventListener("click", async function () {
+            var msg = document.getElementById("evoLogoutMsg");
+            var tok = ((document.getElementById("evoLogoutTok") || {}).value || "").trim();
+            if (!tok) {
+              if (msg) {
+                msg.textContent = "Ingresá la clave (AGENT_SECRET) antes de cerrar sesion.";
+                msg.className = "small mt-2 text-warning";
+              }
+              return;
+            }
+            if (msg) msg.textContent = "Procesando…";
+            var inst = ((document.getElementById("evoInstanceName") || {}).value || "").trim();
+            var bodyJson = inst ? JSON.stringify({ token: tok, instance: inst }) : JSON.stringify({ token: tok });
+            var qInst = inst ? "&instance=" + encodeURIComponent(inst) : "";
+            var lastStatus = 0;
+            var lastNonJson = "";
+            async function readJsonResponse(r) {
+              var text = await r.text();
+              lastStatus = r.status;
+              if (!text || !text.trim()) {
+                lastNonJson = "(respuesta vacia)";
+                return null;
+              }
+              try {
+                lastNonJson = "";
+                return JSON.parse(text);
+              } catch (e) {
+                lastNonJson = text.slice(0, 220);
+                return null;
+              }
+            }
+            function isNotFound(r, j) {
+              return (
+                r.status === 404 ||
+                (j && j.detail === "Not Found") ||
+                (j && j.detail && String(j.detail).toLowerCase().indexOf("not found") >= 0)
+              );
+            }
+            /* /status sin codigo nuevo devuelve health con ok:true — NO es logout */
+            function looksLikeHealthMistake(j) {
+              return (
+                j &&
+                j.ok === true &&
+                j.backend &&
+                !Object.prototype.hasOwnProperty.call(j, "evolution") &&
+                j.evolution_logout_applied !== true
+              );
+            }
+            function isLogoutEndpointPath(url) {
+              var p = (url || "").split("?")[0];
+              if (p.indexOf("/admin/whatsapp") >= 0 && p.indexOf("/admin/whatsapp/api") < 0) return true;
+              return (
+                p.indexOf("/j/logout") >= 0 ||
+                p.indexOf("evo-logout") >= 0 ||
+                p.indexOf("evolution-logout") >= 0 ||
+                p.indexOf("evolution_logout") >= 0 ||
+                p.indexOf("walogout") >= 0 ||
+                p.indexOf("/evolution/api/logout") >= 0
+              );
+            }
+            function isRealLogoutOk(j, attemptUrl) {
+              if (!j || j.ok !== true || looksLikeHealthMistake(j)) return false;
+              if (j.evolution_logout_applied === true) return true;
+              if (Object.prototype.hasOwnProperty.call(j, "evolution")) return true;
+              /* Respuesta ok desde URL dedicada a logout (no exigir clave evolution si Evolution devolvió vacío) */
+              if (isLogoutEndpointPath(attemptUrl)) return true;
+              return false;
+            }
+            /* Misma URL que el panel: POST /admin/whatsapp?wa_op= (si /api/* da 404 por proxy) */
+            var waPost = JSON.stringify({
+              wa_op: "evolution-logout",
+              token: tok,
+              instance: inst || undefined,
+            });
+            /* Primero rutas cortas /j/logout (bridge nuevo); resto por compatibilidad */
+            var attempts = [
+              ["POST", absUrl("/admin/whatsapp"), { "Content-Type": "application/json" }, waPost],
+              ["POST", absUrl("/j/logout"), { "Content-Type": "application/json" }, bodyJson],
+              ["GET", absUrl("/j/logout?token=" + encodeURIComponent(tok) + qInst), null, null],
+              ["POST", API + "/evolution-logout", { "Content-Type": "application/json" }, bodyJson],
+              ["POST", API + "/evolution-logout", { "Content-Type": "application/json", "X-Agent-Secret": tok }, "{}"],
+              ["POST", API + "/evolution-logout", { "Content-Type": "application/json", "X-Agent-Secret": tok }, bodyJson],
+              ["GET", API + "/evolution-logout?token=" + encodeURIComponent(tok) + qInst, null, null],
+              ["GET", absUrl("/admin/whatsapp/evo-logout?token=" + encodeURIComponent(tok) + qInst), null, null],
+              ["POST", absUrl("/admin/whatsapp/evo-logout"), { "Content-Type": "application/json" }, bodyJson],
+              ["GET", absUrl("/admin/evo-logout?token=" + encodeURIComponent(tok) + qInst), null, null],
+              ["POST", absUrl("/admin/evo-logout"), { "Content-Type": "application/json" }, bodyJson],
+              ["GET", absUrl("/evo-logout?token=" + encodeURIComponent(tok) + qInst), null, null],
+              ["POST", absUrl("/evo-logout"), { "Content-Type": "application/json" }, bodyJson],
+              [
+                "GET",
+                absUrl(
+                  "/status?evolution_logout=1&token=" +
+                    encodeURIComponent(tok) +
+                    (inst ? "&instance=" + encodeURIComponent(inst) : "")
+                ),
+                null,
+                null,
+              ],
+              ["POST", absUrl("/evolution/api/logout"), { "Content-Type": "application/json" }, bodyJson],
+              ["GET", absUrl("/evolution/api/logout?token=" + encodeURIComponent(tok) + qInst), null, null],
+              ["POST", absUrl("/walogout"), { "Content-Type": "application/json" }, bodyJson],
+              ["GET", absUrl("/walogout?token=" + encodeURIComponent(tok) + qInst), null, null],
+            ];
+            try {
+              for (var i = 0; i < attempts.length; i++) {
+                var method = attempts[i][0];
+                var url = attempts[i][1];
+                var hdr = attempts[i][2];
+                var body = attempts[i][3];
+                var r = await fetch(absUrl(url), {
+                  method: method,
+                  headers: hdr || {},
+                  body: body,
+                  cache: "no-store",
+                });
+                var uLog = String(url).split("?")[0].replace(/^https?:\/\/[^/]+/, "");
+                pushClientLog("logout", method + " " + uLog + " → HTTP " + r.status);
+                var j = await readJsonResponse(r);
+                if (isNotFound(r, j)) continue;
+                if (looksLikeHealthMistake(j)) continue;
+                if (isRealLogoutOk(j, url)) {
+                  if (msg) {
+                    msg.textContent =
+                      "Sesion cerrada en Evolution. En unos segundos deberia aparecer el QR nuevo en esta misma pagina.";
+                    msg.className = "small mt-2 text-success";
+                  }
+                  setTimeout(refreshQr, 800);
+                  return;
+                }
+                if (j && Object.prototype.hasOwnProperty.call(j, "ok") && j.ok === false) {
+                  if (msg) {
+                    var d = j.detail || "No se pudo cerrar sesion";
+                    if (j.code === "agent_secret_missing") {
+                      d +=
+                        " (en el VPS: definí AGENT_SECRET en .env y reiniciá el bridge).";
+                    }
+                    if (j.raw && typeof j.raw === "object") {
+                      try {
+                        d += " | " + JSON.stringify(j.raw).slice(0, 400);
+                      } catch (e3) {}
+                    }
+                    msg.textContent = d;
+                    msg.className = "small mt-2 text-danger";
+                  }
+                  return;
+                }
+                if (j && j.detail && !isNotFound(r, j)) {
+                  if (msg) {
+                    msg.textContent = j.detail;
+                    msg.className = "small mt-2 text-danger";
+                  }
+                  return;
+                }
+              }
+              if (msg) {
+                var hint =
+                  "No hubo ninguna respuesta valida de logout. Ultimo HTTP " +
+                  lastStatus +
+                  (lastNonJson ? ": " + lastNonJson : "") +
+                  ". Revisá AGENT_SECRET. Si hay muchos 404, actualizá el bridge en el servidor. Abajo: Ver diagnostico.";
+                msg.textContent = hint;
+                msg.className = "small mt-2 text-danger";
+              }
+              loadDiagnostics(tok, document.getElementById("evoDiagOut"));
+            } catch (e) {
+              if (msg) {
+                msg.textContent = String(e);
+                msg.className = "small mt-2 text-danger";
+              }
+            }
+          });
+        }
+        var diagBtn = document.getElementById("evoDiagBtn");
+        if (diagBtn) {
+          diagBtn.addEventListener("click", function () {
+            var tok = ((document.getElementById("evoLogoutTok") || {}).value || "").trim();
+            loadDiagnostics(tok, document.getElementById("evoDiagOut"));
+          });
+        }
+        var sessBtn = document.getElementById("evoSessionsBtn");
+        if (sessBtn) {
+          sessBtn.addEventListener("click", function () {
+            var tok = ((document.getElementById("evoLogoutTok") || {}).value || "").trim();
+            loadEvolutionSessions(tok);
+          });
+        }
+        try {
+          var elTok = document.getElementById("evoLogoutTok");
+          if (elTok) {
+            var saved = sessionStorage.getItem("jarvis_agent_secret");
+            if (saved && !elTok.value) elTok.value = saved;
+            elTok.addEventListener("change", function () {
+              try {
+                var v = (elTok.value || "").trim();
+                if (v) sessionStorage.setItem("jarvis_agent_secret", v);
+              } catch (e2) {}
+            });
+          }
+        } catch (e1) {}
+        var evoClearBtn = document.getElementById("evoClearClientLog");
+        if (evoClearBtn) {
+          evoClearBtn.addEventListener("click", function () {
+            clientLogLines = [];
+            lastServerEvents = null;
+            try {
+              sessionStorage.removeItem(CLIENT_LOG_KEY);
+            } catch (eC) {}
+            renderAutoFeed();
+            pushClientLog("log", "Log del navegador vaciado (se sigue autollenando si el interruptor está activo)");
+          });
+        }
+        setInterval(refreshQr, 2000);
+        refreshQr();
+        setInterval(tickAutoFeed, 8000);
+        tickAutoFeed();
+      })();
+    </script>
     <script type="module">
       const appEl = document.getElementById("app");
 

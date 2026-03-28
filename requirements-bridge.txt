@@ -1,0 +1,9 @@
+# Dependencias mínimas para whatsapp_bridge.py + panel /admin/whatsapp
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
+python-dotenv>=1.0.0
+anthropic>=0.18.0
+google-generativeai>=0.4.0
+pillow>=10.0.0
+psutil>=5.9.0

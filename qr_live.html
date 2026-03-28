@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QR Jarvis (live)</title>
+  <style>
+    body { font-family: sans-serif; background:#111; color:#eee; margin:0; display:grid; place-items:center; min-height:100vh; }
+    .box { text-align:center; }
+    img { width:min(88vw,460px); height:auto; background:#fff; padding:10px; border-radius:12px; }
+    .muted { opacity:.8; margin-top:10px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <img id="qr" src="/jarvis_qr.png" alt="QR Jarvis" />
+    <div class="muted">Se refresca cada 3s</div>
+  </div>
+  <script>
+    const img = document.getElementById("qr");
+    setInterval(() => {
+      img.src = "/jarvis_qr.png?t=" + Date.now();
+    }, 3000);
+  </script>
+</body>
+</html>

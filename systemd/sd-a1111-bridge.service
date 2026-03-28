@@ -1,0 +1,16 @@
+[Unit]
+Description=Puente API estilo Automatic1111 (OpenAI Images) para n8n
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telegram-bot
+EnvironmentFile=-/root/telegram-bot/.env
+# API A1111 en docker0 + imágenes en puerto público (SD_BRIDGE_PUBLIC_PORT) para el markdown del chat.
+ExecStart=/root/telegram-bot/.venv-bridge/bin/python /root/telegram-bot/sd_bridge_runner.py
+Restart=always
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target

@@ -12,3 +12,5 @@ audio.ogg
 productos_imagenes/
 logs/
 notes/
+.venv-bridge/
+data/

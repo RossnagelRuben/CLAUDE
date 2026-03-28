@@ -3,6 +3,19 @@
   "nodes": [
     {
       "parameters": {
+        "content": "### NOTAS — Monitoreo → WhatsApp\n\n**Rol:** cada 15 min revisa disco/RAM/load y, si hay umbral, envía alerta por Evolution API.\n\n**Revisá:** nodo HTTP final (URL instancia, apikey, número destino) para que coincida con `EVOLUTION_*` del `.env`.\n\n**No confundir** con `whatsapp_bridge.py` (Jarvis conversacional).",
+        "height": 260,
+        "width": 380,
+        "color": 4
+      },
+      "id": "e8f3c2b1-4e5d-4f6a-9b0c-1d2e3f4a5b70",
+      "name": "NOTAS — Monitoreo",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [40, 40]
+    },
+    {
+      "parameters": {
         "rule": {
           "interval": [
             {

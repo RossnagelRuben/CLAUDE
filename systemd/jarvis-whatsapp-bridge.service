@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis WhatsApp Bridge (FastAPI / Evolution webhook / panel admin)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ajustá la ruta si el proyecto no está en /root/telegram-bot
+WorkingDirectory=/root/telegram-bot
+EnvironmentFile=-/root/telegram-bot/.env
+# Usá venv o .venv-bridge según tu instalación
+ExecStart=/root/telegram-bot/venv/bin/uvicorn whatsapp_bridge:app --host 0.0.0.0 --port 8766 --proxy-headers
+Restart=always
+RestartSec=3
+# Log en journalctl -u jarvis-whatsapp-bridge
+StandardOutput=append:/root/telegram-bot/whatsapp_stdout.log
+StandardError=append:/root/telegram-bot/whatsapp_stdout.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,20 @@
 {
   "name": "Jarvis - Transcripción de voz",
+  "description": "NOTAS: Webhook POST /transcribir → reenvía audio a transcription_api (faster_whisper). Variable TRANSCRIBE_API_URL en .env. Ver nota amarilla en el lienzo.",
   "nodes": [
+    {
+      "parameters": {
+        "content": "### Jarvis — Transcripción de voz (webhook)\n\n**Qué es:** Cadena **mínima** de n8n que expone un **webhook HTTP** para convertir notas de voz en texto. Es el eslabón que suele estar detrás de `TRANSCRIBE_API_URL` en el `.env`.\n\n**Cómo funciona (flujo):**\n1. **Webhook** `POST` ruta `transcribir` (o la que configuraste), modo respuesta vía nodo Respond.\n2. Recibe **multipart** con campo binario **`audio`** (nombre esperado por el código del bot).\n3. El nodo **HTTP Request** reenvía ese archivo a `POST /transcribe` del servicio local (`transcription_api.py`, puerto típico **8765**).\n4. Esa API usa **faster_whisper** (`transcribe_core.py`) y devuelve JSON `{\"text\": \"...\"}`.\n5. **Respond to Webhook** devuelve ese JSON al cliente (Telegram/WhatsApp bridge).\n\n**Quién lo llama:** `jarvis_bot.py` y `whatsapp_bridge.py` cuando `TRANSCRIBE_API_URL` apunta a este webhook (ej. `http://IP:5678/webhook/transcribir`).\n\n**Si cambiás algo:** misma URL en `.env` + IP/host accesible desde el proceso del bot; y en el nodo HTTP la URL del `transcription_api` (a veces `172.17.0.1:8765` desde el contenedor de n8n). Activá el workflow y probá con un POST multipart.",
+        "height": 560,
+        "width": 440,
+        "color": 4
+      },
+      "id": "d8f3c2b1-4e5d-4f6a-9b0c-1d2e3f4a5b6f",
+      "name": "NOTAS — Webhook voz",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [40, 40]
+    },
     {
       "parameters": {
         "httpMethod": "POST",

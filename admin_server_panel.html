@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>SYSTEM_NODE — Jarvis</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --card: #161b22;
+        --border: rgba(255, 255, 255, 0.08);
+        --cyan: #00e5ff;
+        --green: #00ff94;
+        --muted: #8b949e;
+        --text: #f0f6fc;
+        --danger: #ff6b6b;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      .d-none {
+        display: none !important;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "DM Sans", system-ui, sans-serif;
+        padding-bottom: 88px;
+      }
+      .mono {
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(22, 27, 34, 0.95), var(--bg));
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .brand-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: rgba(0, 229, 255, 0.12);
+        border: 1px solid rgba(0, 229, 255, 0.25);
+        display: grid;
+        place-items: center;
+        color: var(--cyan);
+        font-size: 18px;
+      }
+      .title-block .h1 {
+        font-size: 1rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        margin: 0;
+      }
+      .title-block .sub {
+        font-size: 0.72rem;
+        color: var(--muted);
+        margin: 2px 0 0;
+      }
+      .online-pill {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 12px var(--green);
+        animation: pulse 2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.65;
+        }
+      }
+      main {
+        max-width: 520px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+        margin-bottom: 14px;
+      }
+      .row-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .card.small {
+        padding: 12px;
+      }
+      .card-label {
+        font-size: 0.65rem;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        margin-bottom: 8px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .gauge-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 4px 0 0;
+      }
+      .gauge-svg {
+        width: 100%;
+        max-width: 140px;
+        height: 72px;
+      }
+      .gauge-val {
+        font-size: 1.35rem;
+        font-weight: 700;
+        margin-top: -8px;
+        letter-spacing: -0.02em;
+      }
+      .gauge-sub {
+        font-size: 0.68rem;
+        color: var(--muted);
+        margin-top: 4px;
+        text-align: center;
+        line-height: 1.35;
+      }
+      .disk-name {
+        font-size: 1.05rem;
+        font-weight: 600;
+        margin: 4px 0 10px;
+        word-break: break-all;
+      }
+      .disk-bar {
+        height: 10px;
+        border-radius: 6px;
+        background: #21262d;
+        overflow: hidden;
+        margin-bottom: 10px;
+      }
+      .disk-fill {
+        height: 100%;
+        border-radius: 6px;
+        background: linear-gradient(90deg, var(--cyan), #0099cc);
+        transition: width 0.4s ease;
+      }
+      .disk-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.75rem;
+        color: var(--muted);
+      }
+      .range-tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      .range-tabs button {
+        flex: 1;
+        min-width: 72px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #21262d;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .range-tabs button.active {
+        border-color: rgba(0, 229, 255, 0.45);
+        color: var(--cyan);
+        background: rgba(0, 229, 255, 0.08);
+      }
+      .chart-box {
+        height: 200px;
+        position: relative;
+      }
+      .legend {
+        display: flex;
+        gap: 16px;
+        font-size: 0.72rem;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .legend span {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .lg-c {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--cyan);
+      }
+      .lg-g {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--green);
+      }
+      .param-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.85rem;
+      }
+      .param-row:last-child {
+        border-bottom: none;
+      }
+      .param-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+      .param-left strong {
+        color: var(--text);
+        font-weight: 600;
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+      }
+      .param-val {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.78rem;
+        text-align: right;
+        max-width: 58%;
+      }
+      .thermal-ok {
+        color: var(--green);
+      }
+      .thermal-warn {
+        color: #ffb86c;
+      }
+      .thermal-hot {
+        color: var(--danger);
+      }
+      .token-bar {
+        margin-bottom: 14px;
+      }
+      .token-bar input {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: #0d1117;
+        color: var(--text);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.8rem;
+      }
+      .token-bar button {
+        margin-top: 8px;
+        width: 100%;
+        padding: 10px;
+        border-radius: 10px;
+        border: none;
+        background: linear-gradient(135deg, rgba(0, 229, 255, 0.25), rgba(0, 255, 148, 0.15));
+        color: var(--text);
+        font-weight: 600;
+        cursor: pointer;
+        font-family: inherit;
+      }
+      .err {
+        color: #ffa657;
+        font-size: 0.8rem;
+        margin-top: 8px;
+      }
+      .view {
+        display: none;
+      }
+      .view.active {
+        display: block;
+      }
+      .logs-pre {
+        background: #0d1117;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        font-size: 0.68rem;
+        line-height: 1.45;
+        max-height: 55vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #c9d1d9;
+      }
+      .placeholder {
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.5;
+      }
+      nav.bottom-nav {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: space-around;
+        padding: 10px 8px calc(10px + env(safe-area-inset-bottom));
+        background: rgba(13, 17, 23, 0.92);
+        backdrop-filter: blur(12px);
+        border-top: 1px solid var(--border);
+        z-index: 20;
+      }
+      nav.bottom-nav button {
+        flex: 1;
+        max-width: 96px;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.62rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+        padding: 6px 4px;
+        font-family: inherit;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+      nav.bottom-nav button.active {
+        color: var(--cyan);
+      }
+      nav.bottom-nav svg {
+        width: 22px;
+        height: 22px;
+        opacity: 0.85;
+      }
+      nav.bottom-nav button.active svg {
+        opacity: 1;
+        filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.45));
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon mono">▣</div>
+        <div class="title-block">
+          <p class="h1 mono" id="nodeTitle">SYSTEM_NODE</p>
+          <p class="sub" id="nodeSub">cargando…</p>
+        </div>
+      </div>
+      <div class="online-pill">
+        <span class="dot"></span>
+        <span style="color: var(--green)">ONLINE</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="token-bar" id="authSection">
+        <input type="password" id="tok" placeholder="ADMIN_PANEL_TOKEN (mismo que panel WhatsApp)" autocomplete="off" />
+        <button type="button" id="btnSaveTok">Guardar token y cargar</button>
+        <p class="err d-none" id="errBox"></p>
+      </section>
+
+      <div id="viewDash" class="view active">
+        <div class="row-2">
+          <div class="card small">
+            <div class="card-label"><span>CPU LOAD</span><span class="mono" style="color: var(--cyan)">◇</span></div>
+            <div class="gauge-wrap">
+              <svg class="gauge-svg" viewBox="0 0 100 54" aria-hidden="true">
+                <path
+                  d="M 12 50 A 38 38 0 0 1 88 50"
+                  fill="none"
+                  stroke="#21262d"
+                  stroke-width="9"
+                  stroke-linecap="round"
+                />
+                <path
+                  id="arcCpu"
+                  d="M 12 50 A 38 38 0 0 1 88 50"
+                  fill="none"
+                  stroke="var(--cyan)"
+                  stroke-width="9"
+                  stroke-linecap="round"
+                  stroke-dasharray="119.38"
+                  stroke-dashoffset="119.38"
+                />
+              </svg>
+              <div class="gauge-val mono" id="cpuPct">—%</div>
+              <div class="gauge-sub mono" id="cpuSub">—</div>
+            </div>
+          </div>
+          <div class="card small">
+            <div class="card-label"><span>MEM USAGE</span><span class="mono" style="color: var(--green)">◆</span></div>
+            <div class="gauge-wrap">
+              <svg class="gauge-svg" viewBox="0 0 100 54" aria-hidden="true">
+                <path
+                  d="M 12 50 A 38 38 0 0 1 88 50"
+                  fill="none"
+                  stroke="#21262d"
+                  stroke-width="9"
+                  stroke-linecap="round"
+                />
+                <path
+                  id="arcRam"
+                  d="M 12 50 A 38 38 0 0 1 88 50"
+                  fill="none"
+                  stroke="var(--green)"
+                  stroke-width="9"
+                  stroke-linecap="round"
+                  stroke-dasharray="119.38"
+                  stroke-dashoffset="119.38"
+                />
+              </svg>
+              <div class="gauge-val mono" id="ramPct">—</div>
+              <div class="gauge-sub mono" id="ramSub">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">DISK CAPACITY</div>
+          <div class="disk-name mono" id="diskDev">—</div>
+          <div class="disk-bar"><div class="disk-fill" id="diskFill" style="width: 0%"></div></div>
+          <div class="disk-row">
+            <span id="diskUsed">—</span>
+            <span id="diskTot">—</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">RESOURCE HISTORY</div>
+          <div class="range-tabs">
+            <button type="button" data-range="24h" class="active">24 h</button>
+            <button type="button" data-range="72h">3 días</button>
+            <button type="button" data-range="7d">7 días</button>
+          </div>
+          <div class="legend">
+            <span><i class="lg-c"></i> CPU %</span>
+            <span><i class="lg-g"></i> RAM %</span>
+          </div>
+          <div class="chart-box"><canvas id="histChart"></canvas></div>
+          <p class="mono" style="font-size: 0.65rem; color: var(--muted); margin: 8px 0 0">
+            <span id="histMeta">—</span>
+          </p>
+        </div>
+
+        <div class="card">
+          <div class="card-label">SYSTEM PARAMETERS</div>
+          <div class="param-row">
+            <div class="param-left">
+              <span>🕐</span>
+              <strong>UPTIME</strong>
+            </div>
+            <div class="param-val mono" id="pUptime">—</div>
+          </div>
+          <div class="param-row">
+            <div class="param-left">
+              <span>⌗</span>
+              <strong>OS / KERNEL</strong>
+            </div>
+            <div class="param-val" id="pOs">—</div>
+          </div>
+          <div class="param-row">
+            <div class="param-left">
+              <span>🌡</span>
+              <strong>THERMAL</strong>
+            </div>
+            <div class="param-val mono" id="pTherm">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="viewLogs" class="view">
+        <div class="card">
+          <div class="card-label">WEBHOOK / BRIDGE LOG (reciente)</div>
+          <pre class="logs-pre" id="logsPre">Autenticá con el token y abrí esta pestaña de nuevo.</pre>
+        </div>
+      </div>
+
+      <div id="viewTerm" class="view">
+        <div class="card">
+          <p class="placeholder">
+            La consola interactiva del servidor no está disponible desde el navegador. Usá SSH al VPS para terminal
+            completo.
+          </p>
+        </div>
+      </div>
+
+      <div id="viewSettings" class="view">
+        <div class="card">
+          <div class="card-label">ACTUALIZACIÓN</div>
+          <p class="placeholder" style="margin: 0 0 12px">
+            El panel del servidor se refresca solo cada <strong id="setIntervalLbl">45</strong> s mientras estés en
+            Dashboard.
+          </p>
+          <label class="mono" style="font-size: 0.75rem; color: var(--muted)">Intervalo (segundos)</label>
+          <input type="number" id="refreshSec" min="15" max="300" value="45" style="width: 100%; margin-top: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: #0d1117; color: var(--text)" />
+        </div>
+      </div>
+    </main>
+
+    <nav class="bottom-nav" aria-label="Principal">
+      <button type="button" class="nav-btn active" data-view="Dash">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="7" rx="1" />
+          <rect x="14" y="3" width="7" height="7" rx="1" />
+          <rect x="3" y="14" width="7" height="7" rx="1" />
+          <rect x="14" y="14" width="7" height="7" rx="1" />
+        </svg>
+        DASHBOARD
+      </button>
+      <button type="button" class="nav-btn" data-view="Logs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+        </svg>
+        LOGS
+      </button>
+      <button type="button" class="nav-btn" data-view="Term">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+        TERMINAL
+      </button>
+      <button type="button" class="nav-btn" data-view="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        </svg>
+        SETTINGS
+      </button>
+    </nav>
+
+    <script>
+      const LS = "jarvis_admin_inbox_token";
+      const ARC_LEN = 119.38;
+      let chart;
+      let rangeKey = "24h";
+      let refreshTimer = null;
+      let refreshMs = 45000;
+
+      function token() {
+        return (document.getElementById("tok").value || localStorage.getItem(LS) || "").trim();
+      }
+      function authHeaders() {
+        const t = token();
+        return t ? { Authorization: "Bearer " + t, Accept: "application/json" } : {};
+      }
+      function fmtBytes(n) {
+        if (n < 1024) return n + " B";
+        const u = ["KB", "MB", "GB", "TB"];
+        let i = -1;
+        do {
+          n /= 1024;
+          i++;
+        } while (n >= 1024 && i < u.length - 1);
+        return n.toFixed(i === 0 ? 0 : 1) + " " + u[i];
+      }
+      function fmtUptime(sec) {
+        const d = Math.floor(sec / 86400);
+        const h = Math.floor((sec % 86400) / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        if (d > 0) return d + " d, " + h + " h";
+        if (h > 0) return h + " h, " + m + " min";
+        return m + " min";
+      }
+      function setArc(el, pct) {
+        const p = Math.max(0, Math.min(100, pct));
+        el.style.strokeDashoffset = ARC_LEN * (1 - p / 100);
+      }
+      function showErr(msg) {
+        const e = document.getElementById("errBox");
+        if (!msg) {
+          e.classList.add("d-none");
+          e.textContent = "";
+        } else {
+          e.textContent = msg;
+          e.classList.remove("d-none");
+        }
+      }
+
+      async function loadSnapshot() {
+        showErr("");
+        if (!token()) {
+          showErr("Ingresá el token de admin.");
+          return;
+        }
+        const res = await fetch("/admin/server/api/snapshot?range=" + encodeURIComponent(rangeKey), {
+          headers: authHeaders(),
+        });
+        if (!res.ok) {
+          showErr("No autorizado o error " + res.status);
+          return;
+        }
+        const data = await res.json();
+        const s = data.snapshot;
+        document.getElementById("nodeTitle").textContent = "SYSTEM_NODE";
+        document.getElementById("nodeSub").textContent = s.hostname || "—";
+        document.getElementById("cpuPct").textContent = s.cpu_percent + "%";
+        document.getElementById("cpuSub").textContent =
+          s.cpu_cores + " cores" + (s.cpu_mhz ? " / " + Math.round(s.cpu_mhz) + " MHz" : "");
+        setArc(document.getElementById("arcCpu"), s.cpu_percent);
+        const rp = s.ram_percent;
+        document.getElementById("ramPct").textContent =
+          fmtBytes(s.ram_used_bytes) + " / " + fmtBytes(s.ram_total_bytes);
+        document.getElementById("ramSub").textContent = rp + "% total";
+        setArc(document.getElementById("arcRam"), rp);
+        document.getElementById("diskDev").textContent = s.disk_device || "/";
+        document.getElementById("diskFill").style.width = s.disk_percent + "%";
+        document.getElementById("diskUsed").textContent = fmtBytes(s.disk_used_bytes) + " usados";
+        document.getElementById("diskTot").textContent = fmtBytes(s.disk_total_bytes) + " total";
+        document.getElementById("pUptime").textContent = fmtUptime(s.uptime_seconds);
+        document.getElementById("pOs").textContent = s.os_label || "—";
+        const th = s.thermal_celsius;
+        const pe = document.getElementById("pTherm");
+        if (th == null) {
+          pe.textContent = "N/D";
+          pe.className = "param-val mono";
+        } else {
+          pe.textContent = th + "°C";
+          pe.className = "param-val mono " + (th < 70 ? "thermal-ok" : th < 85 ? "thermal-warn" : "thermal-hot");
+        }
+        const h = data.history;
+        document.getElementById("histMeta").textContent =
+          "Rango: " +
+          h.range +
+          " · puntos en archivo: " +
+          h.points_raw +
+          " · UTC " +
+          (data.server_time_utc || "").slice(11, 19);
+        renderChart(h);
+      }
+
+      function renderChart(h) {
+        const ctx = document.getElementById("histChart");
+        const labels = h.labels || [];
+        const cpu = (h.cpu || []).map((x) => (x == null ? null : x));
+        const ram = (h.ram || []).map((x) => (x == null ? null : x));
+        if (chart) chart.destroy();
+        if (!labels.length) {
+          chart = null;
+          return;
+        }
+        chart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "CPU %",
+                data: cpu,
+                borderColor: "#00e5ff",
+                backgroundColor: "rgba(0, 229, 255, 0.12)",
+                fill: true,
+                tension: 0.35,
+                spanGaps: true,
+                pointRadius: 0,
+                borderWidth: 2,
+              },
+              {
+                label: "RAM %",
+                data: ram,
+                borderColor: "#00ff94",
+                backgroundColor: "rgba(0, 255, 148, 0.08)",
+                fill: true,
+                tension: 0.35,
+                spanGaps: true,
+                pointRadius: 0,
+                borderWidth: 2,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: { legend: { display: false } },
+            scales: {
+              x: {
+                display: true,
+                ticks: {
+                  color: "#8b949e",
+                  maxRotation: 45,
+                  minRotation: 0,
+                  maxTicksLimit: 8,
+                  font: { size: 9, family: "JetBrains Mono" },
+                },
+                grid: { color: "rgba(255,255,255,0.06)" },
+              },
+              y: {
+                min: 0,
+                max: 100,
+                ticks: { color: "#8b949e", font: { size: 9 } },
+                grid: { color: "rgba(255,255,255,0.06)" },
+              },
+            },
+          },
+        });
+      }
+
+      async function loadLogs() {
+        if (!token()) return;
+        const res = await fetch("/admin/whatsapp/api/logs?limit=100", { headers: authHeaders() });
+        const pre = document.getElementById("logsPre");
+        if (!res.ok) {
+          pre.textContent = "Error " + res.status;
+          return;
+        }
+        const j = await res.json();
+        const lines = j.lines || [];
+        pre.textContent = lines.length ? lines.join("\n") : "(sin líneas filtradas)";
+      }
+
+      function goView(name) {
+        document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+        document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
+        document.getElementById("view" + name).classList.add("active");
+        document.querySelector('.nav-btn[data-view="' + name + '"]').classList.add("active");
+        if (name === "Logs") loadLogs();
+        scheduleRefresh();
+      }
+
+      function scheduleRefresh() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        const dash = document.getElementById("viewDash").classList.contains("active");
+        if (!dash || !token()) return;
+        refreshMs = Math.max(15000, parseInt(document.getElementById("refreshSec").value, 10) * 1000 || 45000);
+        document.getElementById("setIntervalLbl").textContent = Math.round(refreshMs / 1000);
+        refreshTimer = setInterval(loadSnapshot, refreshMs);
+      }
+
+      document.querySelectorAll(".nav-btn").forEach((b) =>
+        b.addEventListener("click", () => goView(b.getAttribute("data-view")))
+      );
+      document.querySelectorAll(".range-tabs button").forEach((b) =>
+        b.addEventListener("click", () => {
+          document.querySelectorAll(".range-tabs button").forEach((x) => x.classList.remove("active"));
+          b.classList.add("active");
+          rangeKey = b.getAttribute("data-range");
+          loadSnapshot();
+        })
+      );
+      document.getElementById("btnSaveTok").addEventListener("click", () => {
+        localStorage.setItem(LS, document.getElementById("tok").value.trim());
+        loadSnapshot();
+        scheduleRefresh();
+      });
+      document.getElementById("refreshSec").addEventListener("change", scheduleRefresh);
+
+      document.getElementById("tok").value = localStorage.getItem(LS) || "";
+      loadSnapshot();
+      scheduleRefresh();
+    </script>
+  </body>
+</html>

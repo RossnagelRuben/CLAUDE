@@ -1,9 +1,22 @@
 {
   "id": "2",
   "name": "Jarvis - Transcripción (Agente Chat)",
-  "description": "Agente de Chat Hub que transcribe audios subidos usando la API /transcribe_base64.",
+  "description": "NOTAS: Agente de chat en n8n para probar transcripción (LangChain). NO es el webhook que usan los bots. Ese es «Jarvis - Transcripción de voz». Ver nota amarilla en el lienzo.",
   "active": false,
   "nodes": [
+    {
+      "parameters": {
+        "content": "### Jarvis — Transcripción (Agente Chat)\n\n**Qué es:** Agente de **chat en n8n** para experimentar con transcripción de audio en el entorno LangChain (subís audio al chat del agente según la config del trigger).\n\n**Cómo funciona:** Chat Trigger → modelo de chat + memoria + herramientas que definiste en el workflow (p. ej. llamadas a una API de transcripción). Es un **entorno de prueba** dentro del Hub, no el pipeline principal de los bots.\n\n**No confundir con:** el workflow **«Jarvis - Transcripción de voz»**, que es un **webhook** (`/webhook/transcribir`) que los bots llaman con `TRANSCRIBE_API_URL`.\n\n**Producción real (Telegram/WhatsApp):** audio → webhook N8N o `POST /transcribe` → `transcription_api.py` → **faster_whisper** en `transcribe_core.py`. En WhatsApp podés alternar orden con `WHATSAPP_TRANSCRIBE_LOCAL_FIRST` en `.env`.\n\n**Revisá:** credenciales del modelo (OpenAI u otro) en el nodo correspondiente.",
+        "height": 480,
+        "width": 430,
+        "color": 4
+      },
+      "id": "c8f3c2b1-4e5d-4f6a-9b0c-1d2e3f4a5b6e",
+      "name": "NOTAS — Agente transcripción",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [40, 40]
+    },
     {
       "parameters": {
         "public": true,

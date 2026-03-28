@@ -33,6 +33,7 @@ from telegram.ext import (
 from telegram.error import TelegramError
 
 # Log dedicado DRR (listar, callbacks, errores) para revisar fallos sin mezclar con log general
+from drr.chat_intents import parse_edit_image_intent, parse_producto_imagen_index
 from drr.logger import drr_log
 
 # =========================
@@ -1051,6 +1052,7 @@ def _parse_product_prefs_from_user_text(user_text: str) -> dict:
       - limit (int | None)
       - include_prices (bool | None)
       - order ("last_modified_desc" | "last_modified_asc" | None)
+      - solo_lista_precio_id (int | None)
     """
     t = (user_text or "").lower()
 
@@ -1094,7 +1096,33 @@ def _parse_product_prefs_from_user_text(user_text: str) -> dict:
         if any(kw in t for kw in ("asc", "viejos", "más viejos", "antigu")):
             order = "last_modified_asc"
 
-    return {"limit": limit, "include_prices": include_prices, "order": order}
+    solo_lista_precio_id = None
+    m_lp = re.search(
+        r"(?:lista\s+(?:de\s+)?precio|listaprecio|precio\s+lista)\s*(?:n[°º]?\s*|id\s*|#\s*)?(\d{1,4})\b",
+        t,
+    )
+    if m_lp:
+        try:
+            solo_lista_precio_id = int(m_lp.group(1))
+        except ValueError:
+            solo_lista_precio_id = None
+    if solo_lista_precio_id is None:
+        m_sl = re.search(
+            r"\b(?:solo|únicamente|unicamente|solamente)\s+(?:la\s+)?lista\s+(?:de\s+precio\s+)?(\d{1,4})\b",
+            t,
+        )
+        if m_sl:
+            try:
+                solo_lista_precio_id = int(m_sl.group(1))
+            except ValueError:
+                solo_lista_precio_id = None
+
+    return {
+        "limit": limit,
+        "include_prices": include_prices,
+        "order": order,
+        "solo_lista_precio_id": solo_lista_precio_id,
+    }
 
 
 def _extract_last_modified_dt(extra: dict) -> datetime | None:
@@ -1191,6 +1219,7 @@ def _get_productos(
     *,
     include_prices: bool = True,
     order: str | None = None,
+    solo_lista_precio_id: int | None = None,
 ) -> str:
     """Consulta la API DRR y devuelve productos formateados (con filtros)."""
     if not DRR_API_BASE_URL:
@@ -1211,29 +1240,37 @@ def _get_productos(
         if order in ("last_modified_desc", "last_modified_asc"):
             out_list = _sort_products_by_last_modified(productos, order)
 
-        lines = []
-        for p in out_list[:limit]:
-            linea = f"• {p.descripcion}"
-            if p.codigo_barras:
-                linea += f" | Cód: {p.codigo_barras}"
-            if include_prices and p.precio is not None:
-                linea += f" | ${p.precio:.2f}"
-            lines.append(linea)
+        from drr.formatter import linea_producto_resumen
+        from drr.lista_precios import nombres_listas_precio
 
-        result = "\n".join(lines)
+        nombres: dict[int, str] = {}
+        if include_prices:
+            nombres = nombres_listas_precio(DRR_API_BASE_URL, DRR_API_KEY or None)
+
+        lines = [
+            linea_producto_resumen(
+                p,
+                include_prices=include_prices,
+                nombres_lista_precio=nombres if include_prices else None,
+                solo_lista_precio_id=solo_lista_precio_id,
+            )
+            for p in out_list[:limit]
+        ]
+
+        result = "\n\n".join(lines)
         if total > limit:
-            result += f"\n_(mostrando {limit} de {total})_"
+            result += f"\n\n_(mostrando {limit} de {total})_"
         return result
     except Exception as e:
         return f"(Error DRR: {e})"
 
 
 def _download_image_bytes(url: str) -> bytes | None:
-    """Descarga una imagen desde URL; devuelve bytes o None."""
+    """Descarga una imagen desde URL (User-Agent de navegador)."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "JarvisBot/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read()
+        from drr.web_image_search import download_image_url
+
+        return download_image_url(url, max_bytes=20 * 1024 * 1024)
     except Exception as e:
         logger.warning("Error descargando imagen %s: %s", url[:50], e)
         return None
@@ -1241,28 +1278,25 @@ def _download_image_bytes(url: str) -> bytes | None:
 
 def _search_web_image_and_download(query: str, max_size: int = 20 * 1024 * 1024) -> tuple[bytes | None, str]:
     """
-    Busca imágenes en internet (DuckDuckGo), descarga la primera y devuelve (bytes, mime_type).
-    Si falla, devuelve (None, ""). Así el usuario puede 'buscar imagen X' y luego editarla con Gemini.
+    DuckDuckGo (reintentos / regiones) + descarga con httpx.
+    Si no hay resultados web, respaldo con imagen generada (GEMINI / OpenAI).
     """
-    try:
-        from ddgs import DDGS
-        with DDGS() as ddgs:
-            results = list(ddgs.images(query.strip(), max_results=5))
-    except Exception as e:
-        logger.warning("Búsqueda de imágenes falló: %s", e)
-        return None, ""
-    for r in results:
-        url = r.get("image") or r.get("url") or r.get("thumbnail")
-        if not url:
-            continue
-        img_bytes = _download_image_bytes(url)
-        if img_bytes and len(img_bytes) <= max_size:
-            mime = "image/jpeg"
-            if url.lower().endswith(".png"):
-                mime = "image/png"
-            elif url.lower().endswith(".webp"):
-                mime = "image/webp"
-            return img_bytes, mime
+    from drr.image_generate_env import generate_image_bytes_env
+    from drr.web_image_search import search_web_image_bytes
+
+    img_bytes, mime = search_web_image_bytes(query, max_size=max_size)
+    if img_bytes:
+        return img_bytes, mime
+    if os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip():
+        logger.info(
+            "BUSCAR_IMAGEN: sin resultados web para %r; usando imagen generada como respaldo",
+            (query or "")[:80],
+        )
+        gen = generate_image_bytes_env(
+            f"Fotografía o ilustración realista, un solo encuadre claro, tema: {query}"
+        )
+        if gen:
+            return gen, "image/png"
     return None, ""
 
 
@@ -1410,8 +1444,16 @@ async def cmd_productos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 return
             text, producto = await asyncio.to_thread(servicio.ver, id_codigo)
             await update.message.reply_text(text)
-            if producto and producto.imagen_url:
-                img_bytes = await asyncio.to_thread(_download_image_bytes, producto.imagen_url)
+            if producto and DRR_API_BASE_URL:
+                from drr.api_client import fetch_product_image_bytes_for_snapshot
+
+                snap = producto.to_snapshot()
+                img_bytes = await asyncio.to_thread(
+                    fetch_product_image_bytes_for_snapshot,
+                    snap,
+                    base_url=DRR_API_BASE_URL,
+                    api_key=DRR_API_KEY or None,
+                )
                 if img_bytes:
                     await update.message.reply_photo(photo=BytesIO(img_bytes), caption="Imagen actual (API)")
             # Si hay imagen guardada localmente, también mostrarla
@@ -1536,40 +1578,6 @@ LAST_IMAGE_FOR_EDIT_KEY = "last_image_for_edit"
 # Límite de tamaño para guardar en contexto (API Imagen acepta hasta 20 MB).
 MAX_IMAGE_EDIT_BYTES = 20 * 1024 * 1024
 
-# Prefijos/frases que indican que el usuario quiere editar la última imagen con Gemini.
-_EDIT_IMAGE_PREFIXES = (
-    "edita esta imagen",
-    "editar esta imagen",
-    "edita la imagen",
-    "editar la imagen",
-    "edita la foto",
-    "editar la foto",
-    "cambia esta imagen",
-    "modifica esta imagen",
-    "editala",
-    "edítala",
-)
-
-
-def _is_edit_image_intent(text: str) -> str | None:
-    """
-    Si el texto indica que el usuario quiere editar la última imagen con Gemini, devuelve el prompt de edición.
-    Si no, devuelve None. El prompt puede ser el texto completo o el resto tras un prefijo conocido.
-    """
-    if not text or len(text) > 1500:
-        return None
-    t = text.strip().lower()
-    for prefix in _EDIT_IMAGE_PREFIXES:
-        if t.startswith(prefix):
-            rest = text.strip()[len(prefix):].strip().lstrip(":").strip()
-            return rest or text.strip()
-    if t.startswith("edita ") or t.startswith("editar "):
-        rest = text.strip()[7:].strip()
-        if rest and ("imagen" in t[:30] or "foto" in t[:30] or "esta" in t[:20]):
-            return rest
-    return None
-
-
 async def _do_edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> bool:
     """
     Edita la última imagen guardada (foto del usuario o generada) con Gemini Imagen según el prompt.
@@ -1590,22 +1598,17 @@ async def _do_edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         return False
     await update.message.reply_text("🖼 Editando imagen con Gemini...")
     try:
-        from google import genai
-        from google.genai import types
+        from drr.gemini_image_edit import gemini_edit_image_bytes
+
         img_bytes = data["bytes"]
         mime = data.get("mime_type") or "image/png"
-        ref_image = types.RawReferenceImage(
-            reference_id=1,
-            reference_image=types.Image(image_bytes=img_bytes, mime_type=mime),
-        )
-        client_gemini = genai.Client(api_key=GEMINI_API_KEY)
-        response = client_gemini.models.edit_image(
-            model="imagen-3.0-capability-001",
+        out_bytes = gemini_edit_image_bytes(
+            api_key=GEMINI_API_KEY,
+            image_bytes=img_bytes,
+            mime_type=mime,
             prompt=prompt,
-            reference_images=[ref_image],
         )
-        if response.generated_images and response.generated_images[0].image and response.generated_images[0].image.image_bytes:
-            out_bytes = response.generated_images[0].image.image_bytes
+        if out_bytes:
             await update.message.reply_photo(photo=BytesIO(out_bytes), caption=prompt[:200])
             context.user_data[LAST_IMAGE_FOR_EDIT_KEY] = {"bytes": out_bytes, "mime_type": "image/png"}
             append_log("sistema", f"Imagen editada (Gemini): {prompt[:80]}...", entry_type="imagen")
@@ -1629,39 +1632,11 @@ async def _do_generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not prompt:
         return False
     await update.message.reply_text("🖼 Generando imagen...")
-    image_bytes = None
-    if GEMINI_API_KEY:
-        try:
-            from google import genai
-            from google.genai import types
-            client_gemini = genai.Client(api_key=GEMINI_API_KEY)
-            response = client_gemini.models.generate_images(
-                model="imagen-3.0-generate-002",
-                prompt=prompt,
-                config=types.GenerateImagesConfig(number_of_images=1),
-            )
-            if response.generated_images and response.generated_images[0].image and response.generated_images[0].image.image_bytes:
-                image_bytes = response.generated_images[0].image.image_bytes
-                append_log("sistema", f"Imagen (chat, Gemini): {prompt[:80]}...", entry_type="imagen")
-        except Exception as e:
-            logger.warning("Gemini Imagen falló: %s", e)
-    if image_bytes is None and OPENAI_API_KEY:
-        try:
-            from openai import OpenAI
-            client_openai = OpenAI(api_key=OPENAI_API_KEY)
-            response = client_openai.images.generate(
-                model="dall-e-3",
-                prompt=prompt,
-                size="1024x1024",
-                quality="standard",
-                n=1,
-                response_format="b64_json",
-            )
-            image_bytes = base64.b64decode(response.data[0].b64_json)
-            append_log("sistema", f"Imagen (chat, OpenAI): {prompt[:80]}...", entry_type="imagen")
-        except Exception as e:
-            logger.exception("Error imagen OpenAI: %s", e)
+    from drr.image_generate_env import generate_image_bytes_env
+
+    image_bytes = generate_image_bytes_env(prompt)
     if image_bytes:
+        append_log("sistema", f"Imagen (chat): {prompt[:80]}...", entry_type="imagen")
         await update.message.reply_photo(photo=BytesIO(image_bytes), caption=prompt[:200])
         # Guardar como última imagen para que el usuario pueda pedir editarla con Gemini (Nanobanana).
         context.user_data[LAST_IMAGE_FOR_EDIT_KEY] = {"bytes": image_bytes, "mime_type": "image/png"}
@@ -1738,10 +1713,51 @@ async def _process_user_message(
         return
 
     # =========================
+    # Imagen de producto DRR (listado previo), por lenguaje natural
+    # =========================
+    idx_drr = parse_producto_imagen_index(text.strip())
+    if idx_drr is not None and (context.user_data or {}).get("drr_last_products_snap"):
+        snaps = context.user_data["drr_last_products_snap"]
+        if not (1 <= idx_drr <= len(snaps)):
+            await update.message.reply_text(
+                f"En el último listado solo hay {len(snaps)} producto(s). Pedí un número entre 1 y {len(snaps)}."
+            )
+            return
+        row = snaps[idx_drr - 1]
+        if not DRR_API_BASE_URL:
+            await update.message.reply_text("❌ DRR no está configurado (DRR_API_BASE_URL).")
+            return
+        await update.message.reply_text("🖼 Descargando imagen del producto…")
+        from drr.api_client import fetch_product_image_bytes_for_snapshot
+
+        img_bytes = await asyncio.to_thread(
+            fetch_product_image_bytes_for_snapshot,
+            row,
+            base_url=DRR_API_BASE_URL,
+            api_key=DRR_API_KEY or None,
+        )
+        if img_bytes:
+            desc = (row.get("descripcion") or "")[:100]
+            cap = f"Producto {idx_drr}: {desc}" if desc else f"Producto {idx_drr}"
+            context.user_data[LAST_IMAGE_FOR_EDIT_KEY] = {
+                "bytes": img_bytes,
+                "mime_type": "image/jpeg",
+            }
+            await update.message.reply_photo(photo=BytesIO(img_bytes), caption=cap[:200])
+            await update.message.reply_text(
+                "✅ Podés pedirme que la edite (ej. «edita esta imagen: …») o /editarimagen."
+            )
+            return
+        await update.message.reply_text(
+            f"El producto {idx_drr} no tiene imagen en la API o no se pudo descargar (reintento con Include=2 / Observaciones)."
+        )
+        return
+
+    # =========================
     # EDICIÓN DE IMAGEN CON GEMINI (Nanobanana): si hay última imagen y el texto pide editarla
     # Funciona con texto o con transcripción de audio (ej: "edita esta imagen: poné un fondo de playa").
     # =========================
-    edit_prompt = _is_edit_image_intent(text.strip())
+    edit_prompt = parse_edit_image_intent(text.strip())
     if edit_prompt and (context.user_data or {}).get(LAST_IMAGE_FOR_EDIT_KEY):
         await _do_edit_image(update, context, edit_prompt)
         return
@@ -1845,18 +1861,20 @@ async def _process_user_message(
             if final_include_prices is None:
                 final_include_prices = True
             final_order = prefs.get("order")
+            final_solo_lista = prefs.get("solo_lista_precio_id")
 
             logger.info(
-                "[%s] DRR filtros (from Telegram): desc=%r limit=%s include_prices=%s order=%r",
+                "[%s] DRR filtros (from Telegram): desc=%r limit=%s include_prices=%s order=%r solo_lista=%s",
                 update.effective_chat.id if update.effective_chat else "unknown",
                 desc,
                 final_limit,
                 final_include_prices,
                 final_order,
+                final_solo_lista,
             )
             append_log(
                 "sistema",
-                f"DRR filtros (Telegram): desc={desc!r} limit={final_limit} include_prices={final_include_prices} order={final_order!r}",
+                f"DRR filtros (Telegram): desc={desc!r} limit={final_limit} include_prices={final_include_prices} order={final_order!r} solo_lista={final_solo_lista!r}",
             )
 
             await update.message.reply_text(f"📦 Buscando productos: {desc or 'todos'} (limit={final_limit})...")
@@ -1865,10 +1883,77 @@ async def _process_user_message(
                 limit=final_limit,
                 include_prices=final_include_prices,
                 order=final_order,
+                solo_lista_precio_id=final_solo_lista,
             )
             append_log("assistant", f"PRODUCTOS => {resultado[:200]}", entry_type="producto")
-            await update.message.reply_text(f"📦 Productos DRR:\n{resultado}"[:4000])
+            try:
+                from drr.api_client import DRRProductoAPIClient
+
+                repo = DRRProductoAPIClient(DRR_API_BASE_URL, api_key=DRR_API_KEY or None, cache_ttl_seconds=25)
+                fetch_limit = final_limit if final_order is None else max(final_limit, 50)
+                plist = repo.listar(descripcion=desc or None, limit=fetch_limit)
+                if final_order in ("last_modified_desc", "last_modified_asc"):
+                    plist = _sort_products_by_last_modified(plist, final_order)
+                shown = plist[:final_limit]
+                context.user_data["drr_last_products_snap"] = [p.to_snapshot() for p in shown]
+            except Exception:
+                context.user_data["drr_last_products_snap"] = []
+            out_txt = f"📦 Productos DRR:\n{resultado}"
+            if context.user_data.get("drr_last_products_snap"):
+                out_txt += (
+                    "\n\n_Para ver la imagen de un ítem: «imagen del producto 1» o «foto del primero»._"
+                )
+            await update.message.reply_text(out_txt[:4000])
             return
+
+        if "PRODUCTO_IMAGEN:" in response.upper():
+            m = re.search(r"PRODUCTO_IMAGEN:\s*(\d+)", response, flags=re.IGNORECASE)
+            if m:
+                try:
+                    n = int(m.group(1))
+                except Exception:
+                    n = 0
+                if n > 0:
+                    snaps = (context.user_data or {}).get("drr_last_products_snap") or []
+                    if not snaps:
+                        await update.message.reply_text(
+                            "No hay listado de productos reciente. Pedime primero productos (ej. «traeme 5 martillos»)."
+                        )
+                        return
+                    if n < 1 or n > len(snaps):
+                        await update.message.reply_text(
+                            f"En el último listado solo hay {len(snaps)} producto(s)."
+                        )
+                        return
+                    row = snaps[n - 1]
+                    if not DRR_API_BASE_URL:
+                        await update.message.reply_text("❌ DRR no está configurado (DRR_API_BASE_URL).")
+                        return
+                    await update.message.reply_text("🖼 Descargando imagen del producto…")
+                    from drr.api_client import fetch_product_image_bytes_for_snapshot
+
+                    img_bytes = await asyncio.to_thread(
+                        fetch_product_image_bytes_for_snapshot,
+                        row,
+                        base_url=DRR_API_BASE_URL,
+                        api_key=DRR_API_KEY or None,
+                    )
+                    if not img_bytes:
+                        await update.message.reply_text(
+                            "No pude obtener la imagen (reintento con Include=2 / Observaciones en la API DRR)."
+                        )
+                        return
+                    desc = (row.get("descripcion") or "")[:100]
+                    cap = f"Producto {n}: {desc}" if desc else f"Producto {n}"
+                    context.user_data[LAST_IMAGE_FOR_EDIT_KEY] = {
+                        "bytes": img_bytes,
+                        "mime_type": "image/jpeg",
+                    }
+                    await update.message.reply_photo(photo=BytesIO(img_bytes), caption=cap[:200])
+                    await update.message.reply_text(
+                        "✅ Podés pedirme que la edite (ej. «edita esta imagen: …») o /editarimagen."
+                    )
+                    return
 
         if "BUSCAR_IMAGEN:" in response:
             m = re.search(r"BUSCAR_IMAGEN:\s*(.+)", response, re.DOTALL)

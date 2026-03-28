@@ -1,0 +1,266 @@
+{
+  "id": "4",
+  "versionId": "004907c3-dce5-4425-8242-258bc43e03e3",
+  "name": "Jarvis - Stable Diffusion (Agente Chat)",
+  "description": "NOTAS (léeme): Chat Hub → Gemini + tools HTTP a API tipo A1111 (172.17.0.1:7860): list_models, get_options, txt2img, img2img, interrogate. En el lienzo hay una nota amarilla con el detalle. Los bots Telegram/WhatsApp usan otro camino (Gemini/DALL·E en el servidor).",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### Jarvis — Stable Diffusion (Agente Chat)\n\n**Qué es:** Agente de conversación en el **Chat Hub** de n8n pensado para crear y modificar imágenes usando una API compatible con **Automatic1111 WebUI** (mismos endpoints `/sdapi/v1/txt2img`, `img2img`, modelos, interrogate, etc.).\n\n**Cómo funciona (flujo):**\n1. El usuario escribe un prompt o sube una imagen en el chat del agente.\n2. **Gemini** (modelo del agente) decide qué herramienta llamar según el system prompt.\n3. Los nodos **HTTP Request Tool** hablan con tu instancia A1111 (o el puente que exponga el mismo JSON).\n4. La respuesta al usuario debe incluir **markdown con imágenes** (`![texto](URL)`) cuando el backend devuelva URLs de previsualización, para que se vean en el chat de n8n.\n\n**Requisitos:** WebUI/API escuchando donde indiquen las URLs de los nodos (por defecto `172.17.0.1:7860` desde Docker). Credencial **Google Gemini** en el nodo del modelo.\n\n**Relación con WhatsApp/Telegram:** El bot en el servidor puede generar imágenes por **Gemini Imagen / DALL·E** (`whatsapp_bridge.py` / `jarvis_bot.py`). Este workflow es independiente: sirve para **probar SD desde n8n** sin pasar por los bots.",
+        "height": 520,
+        "width": 440,
+        "color": 4
+      },
+      "id": "a7f3c2b1-4e5d-4f6a-9b0c-1d2e3f4a5b6c",
+      "name": "NOTAS — Stable Diffusion",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [40, 40]
+    },
+    {
+      "parameters": {
+        "public": true,
+        "mode": "hostedChat",
+        "authentication": "none",
+        "availableInChat": true,
+        "agentName": "Jarvis - Stable Diffusion",
+        "agentDescription": "Describí una escena o subí una imagen: genero con txt2img, edito con img2img o extraigo tags con interrogate (API local A1111).",
+        "options": {
+          "allowFileUploads": true,
+          "allowedFilesMimeTypes": "image/*",
+          "inputPlaceholder": "Prompt / imagen para editar…",
+          "responseMode": "streaming",
+          "loadPreviousSession": "memory"
+        }
+      },
+      "id": "chat-trigger-sd",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [260, 260]
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 10
+      },
+      "id": "simple-memory-sd",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [260, 480]
+    },
+    {
+      "parameters": {
+        "modelName": "gemini-2.5-flash"
+      },
+      "id": "gemini-chat-model-sd",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [500, 120],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "JJk3gqpR0AM7pBGP",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "auto",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "systemMessage": "Eres **Jarvis SD**, asistente para crear y modificar imágenes. En este despliegio el backend expone el **mismo contrato HTTP que Automatic1111** (`/sdapi/v1/txt2img`, etc.), pero la generación puede estar resuelta por **OpenAI (DALL·E)** si no hay GPU local: no prometas “modelos SD concretos del usuario” salvo que te confirmen que usan WebUI real.\n\n---\n**Diseño (SOLID, guía de comportamiento)**\n- **S — Responsabilidad única:** cada herramienta hace *una* cosa (listar modelos, leer opciones, txt2img, img2img, interrogate). No mezcles responsabilidades en una sola llamada conceptual.\n- **O — Abierto/cerrado:** para nuevas capacidades (upscale, controlnet, etc.) se añaden nodos/herramientas nuevos, no se reescribe el agente desde cero.\n- **L — Sustitución:** asumí respuestas JSON estándar de A1111; si el backend devuelve error, explicá el fallo sin inventar imágenes.\n- **I — Interfaces segregadas:** usá solo la herramienta necesaria (no llames a list_models en cada turno si no aporta).\n- **D — Inversión de dependencias:** la URL del backend está en los nodos HTTP del workflow, no en tus respuestas; vos consumís herramientas abstractas.\n\n---\n**Cumplimiento y seguridad**\n- Respetá leyes y políticas de contenido. No solicités ni generés material ilegal o prohibido por tu organización.\n- \"Sin límites\" aquí significa *sin tope artificial en el workflow*: el hardware, tiempos de cola y políticas del modelo local siguen aplicando.\n\n---\n**Herramientas**\n| Herramienta | Uso |\n|-------------|-----|\n| `sd_a1111_list_models` | Listar checkpoints/modelos cargables. |\n| `sd_a1111_get_options` | Ver opciones globales (checkpoint actual, etc.). |\n| `sd_a1111_txt2img` | Texto → imagen. |\n| `sd_a1111_img2img` | Imagen + prompt → variación/edición (priorizá imagen adjunta en el chat). |\n| `sd_a1111_interrogate` | Imagen → palabras clave (CLIP o deepdanbooru). |\n\n---\n**Buenas prácticas**\n1) Antes de jobs pesados, resumí plan (prompt, resolución aproximada, steps) si el usuario no fue explícito.\n2) Defaults razonables: ~25–30 steps, CFG 6–9, sampler `DPM++ 2M Karras` si no indican otro; seed `-1` para aleatorio.\n3) **Salida visible en el chat de n8n (OBLIGATORIO):** tras `txt2img` o `img2img` exitosos, la API incluye `chat_preview_urls` (lista de URLs http). Debés incluir en tu mensaje al usuario **al menos una línea markdown por URL**, en este formato exacto, sin acortar la URL: `![imagen generada](URL_COMPLETA)`. No basta con decir que generaste la imagen: sin esas líneas el usuario no ve nada. Si por algún motivo `chat_preview_urls` viene vacío, entonces sí usá `data:image/png;base64,...` acotado o explicá el error.\n4) **img2img:** si hay archivo de imagen en el mensaje, usalo; si el usuario pega base64, usá el parámetro `init_image_base64` (sin prefijo `data:image/...` si es posible; si viene con prefijo, indicá que la herramienta espera solo el payload base64 puro).\n5) Si el usuario pide \"mismo estilo, otro encuadre\", img2img con `denoising_strength` moderado (p. ej. 0.45–0.65).\n\n---\n**Idioma:** respondé en español salvo que pidan otro.",
+          "maxIterations": 12,
+          "returnIntermediateSteps": false,
+          "passthroughBinaryImages": true,
+          "enableStreaming": true,
+          "batching": {}
+        }
+      },
+      "id": "ai-agent-sd",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [500, 320]
+    },
+    {
+      "parameters": {
+        "toolDescription": "[SRP: consulta] Lista checkpoints visibles en Automatic1111 (`GET /sdapi/v1/sd-models`). Usalo cuando el usuario pregunte qué modelos hay o antes de sugerir un cambio de modelo.",
+        "method": "GET",
+        "url": "http://172.17.0.1:7860/sdapi/v1/sd-models",
+        "authentication": "none",
+        "responseType": "json",
+        "optimizeResponse": false
+      },
+      "id": "tool-sd-list-models",
+      "name": "sd_a1111_list_models",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [820, 140]
+    },
+    {
+      "parameters": {
+        "toolDescription": "[SRP: consulta] Lee opciones globales (`GET /sdapi/v1/options`), p. ej. checkpoint actual. No modifica nada.",
+        "method": "GET",
+        "url": "http://172.17.0.1:7860/sdapi/v1/options",
+        "authentication": "none",
+        "responseType": "json",
+        "optimizeResponse": false
+      },
+      "id": "tool-sd-get-options",
+      "name": "sd_a1111_get_options",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [820, 260]
+    },
+    {
+      "parameters": {
+        "toolDescription": "[SRP: generación] Texto a imagen (`POST /sdapi/v1/txt2img`). La respuesta JSON incluye `chat_preview_urls`: el agente debe pegar esas URLs en markdown `![](url)` para que el usuario vea la imagen en el chat n8n.",
+        "method": "POST",
+        "url": "http://172.17.0.1:7860/sdapi/v1/txt2img",
+        "authentication": "none",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "prompt", "value": "={{$json.prompt}}" },
+            { "name": "negative_prompt", "value": "={{$json.negative_prompt || ''}}" },
+            { "name": "steps", "value": "={{ Number($json.steps) || 25 }}" },
+            { "name": "width", "value": "={{ Number($json.width) || 512 }}" },
+            { "name": "height", "value": "={{ Number($json.height) || 512 }}" },
+            { "name": "cfg_scale", "value": "={{ Number($json.cfg_scale) || 7 }}" },
+            { "name": "sampler_name", "value": "={{$json.sampler_name || 'DPM++ 2M Karras'}}" },
+            { "name": "seed", "value": "={{ ($json.seed !== undefined && $json.seed !== null && String($json.seed) !== '') ? Number($json.seed) : -1 }}" },
+            { "name": "batch_size", "value": "={{ Number($json.batch_size) || 1 }}" },
+            { "name": "restore_faces", "value": "={{ $json.restore_faces === true || $json.restore_faces === 'true' }}" },
+            { "name": "enable_hr", "value": "={{ $json.enable_hr === true || $json.enable_hr === 'true' }}" }
+          ]
+        },
+        "responseType": "json",
+        "optimizeResponse": false,
+        "truncateResponse": false,
+        "placeholderDefinitions": {
+          "values": [
+            { "name": "prompt", "description": "Prompt principal en inglés o español (tags o frase descriptiva).", "type": "string" },
+            { "name": "negative_prompt", "description": "Qué evitar (opcional).", "type": "string" },
+            { "name": "steps", "description": "Pasos de muestreo (entero, típico 20–40).", "type": "string" },
+            { "name": "width", "description": "Ancho en píxeles (múltiplo de 8 recomendado).", "type": "string" },
+            { "name": "height", "description": "Alto en píxeles.", "type": "string" },
+            { "name": "cfg_scale", "description": "CFG scale (típico 5–12).", "type": "string" },
+            { "name": "sampler_name", "description": "Nombre del sampler en A1111 (opcional).", "type": "string" },
+            { "name": "seed", "description": "Semilla entera o -1 para aleatorio (opcional).", "type": "string" },
+            { "name": "batch_size", "description": "Cantidad de imágenes por lote (opcional, default 1).", "type": "string" },
+            { "name": "restore_faces", "description": "true/false restaurar caras si el backend lo soporta (opcional).", "type": "string" },
+            { "name": "enable_hr", "description": "true/false hires fix (opcional, consume más VRAM).", "type": "string" }
+          ]
+        }
+      },
+      "id": "tool-sd-txt2img",
+      "name": "sd_a1111_txt2img",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [820, 400]
+    },
+    {
+      "parameters": {
+        "toolDescription": "[SRP: edición] Img2img (`POST /sdapi/v1/img2img`). Usa la imagen adjunta al chat (`data0`) o `init_image_base64` si el usuario pegó base64 puro.",
+        "method": "POST",
+        "url": "http://172.17.0.1:7860/sdapi/v1/img2img",
+        "authentication": "none",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ ({ prompt: $json.prompt, negative_prompt: $json.negative_prompt || '', init_images: [ ($binary.data0 && $binary.data0.data) ? $binary.data0.data : ($json.init_image_base64 || '') ], denoising_strength: Number($json.denoising_strength) || 0.55, steps: Number($json.steps) || 25, width: Number($json.width) || 512, height: Number($json.height) || 512, cfg_scale: Number($json.cfg_scale) || 7, sampler_name: $json.sampler_name || 'DPM++ 2M Karras', seed: ($json.seed !== undefined && $json.seed !== null && String($json.seed) !== '') ? Number($json.seed) : -1, resize_mode: Number($json.resize_mode) || 0 }) }}",
+        "responseType": "json",
+        "optimizeResponse": false,
+        "truncateResponse": false,
+        "placeholderDefinitions": {
+          "values": [
+            { "name": "prompt", "description": "Cambios deseados sobre la imagen base.", "type": "string" },
+            { "name": "negative_prompt", "description": "Negativo (opcional).", "type": "string" },
+            { "name": "init_image_base64", "description": "Base64 de la imagen inicial si NO hay adjunto en el chat (sin data URL).", "type": "string" },
+            { "name": "denoising_strength", "description": "Fuerza del ruido 0–1 (más alto = más cambio).", "type": "string" },
+            { "name": "steps", "description": "Pasos (entero).", "type": "string" },
+            { "name": "width", "description": "Ancho salida.", "type": "string" },
+            { "name": "height", "description": "Alto salida.", "type": "string" },
+            { "name": "cfg_scale", "description": "CFG.", "type": "string" },
+            { "name": "sampler_name", "description": "Sampler A1111 (opcional).", "type": "string" },
+            { "name": "seed", "description": "Semilla o vacío/-1 aleatorio.", "type": "string" },
+            { "name": "resize_mode", "description": "0=just resize, 1=crop, 2=fill… según A1111 (opcional, default 0).", "type": "string" }
+          ]
+        }
+      },
+      "id": "tool-sd-img2img",
+      "name": "sd_a1111_img2img",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [820, 540]
+    },
+    {
+      "parameters": {
+        "toolDescription": "[SRP: análisis] Interrogate (`POST /sdapi/v1/interrogate`): sugiere tags/prompt desde una imagen. Modelos típicos: `clip` o `deepdanbooru` si está instalado.",
+        "method": "POST",
+        "url": "http://172.17.0.1:7860/sdapi/v1/interrogate",
+        "authentication": "none",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ ({ image: ($binary.data0 && $binary.data0.data) ? $binary.data0.data : ($json.image_base64 || ''), model: $json.model || 'clip' }) }}",
+        "responseType": "json",
+        "optimizeResponse": false,
+        "truncateResponse": true,
+        "maxLength": 8000,
+        "placeholderDefinitions": {
+          "values": [
+            { "name": "model", "description": "`clip` o `deepdanbooru` (según tu A1111).", "type": "string" },
+            { "name": "image_base64", "description": "Imagen en base64 si no hay adjunto en el chat.", "type": "string" }
+          ]
+        }
+      },
+      "id": "tool-sd-interrogate",
+      "name": "sd_a1111_interrogate",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [820, 680]
+    }
+  ],
+  "connections": {
+    "Chat Trigger": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          { "node": "Chat Trigger", "type": "ai_memory", "index": 0 },
+          { "node": "AI Agent", "type": "ai_memory", "index": 0 }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "sd_a1111_list_models": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "sd_a1111_get_options": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "sd_a1111_txt2img": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "sd_a1111_img2img": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "sd_a1111_interrogate": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}

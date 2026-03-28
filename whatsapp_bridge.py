@@ -18,6 +18,9 @@ Seguridad:
 
 import asyncio
 import base64
+import html
+import json
+import time
 import logging
 import os
 import re
@@ -28,8 +31,35 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+
+from evolution_qr import (
+    ADMIN_EVOLUTION_QR_API_PREFIX,
+    API_PREFIX,
+    build_api_qr_response,
+    evolution_instances_for_panel,
+    handle_logout_post_body,
+    html_qr_page,
+)
+from server_metrics import append_sample_if_due, get_dashboard_payload
+
+from whatsapp_debug_log import (
+    LOG_FILE,
+    debug_log_enabled,
+    get_recent_debug_events,
+    log_event,
+    log_http_request,
+)
+
+from drr.chat_intents import (
+    parse_edit_image_intent,
+    parse_followup_last_image_edit_intent,
+    parse_producto_imagen_index,
+    parse_save_image_to_drr_product_index,
+    parse_upload_whatsapp_catalog_index,
+    user_requested_ai_image_generation,
+)
 
 try:
     import anthropic  # opcional: solo si CLAUDE_API_KEY está configurado
@@ -54,14 +84,30 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 AGENT_SECRET = os.getenv("AGENT_SECRET", "").strip()
 ADMIN_PANEL_TOKEN = os.getenv("ADMIN_PANEL_TOKEN", "").strip() or AGENT_SECRET
 TRANSCRIBE_API_URL = os.getenv("TRANSCRIBE_API_URL", "").strip()
+# Misma clave que Telegram para DALL·E (fallback si Gemini Imagen falla).
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+# Si es True, WhatsApp intenta primero faster_whisper local y luego N8N (orden inverso al default).
+WHATSAPP_TRANSCRIBE_LOCAL_FIRST = os.getenv("WHATSAPP_TRANSCRIBE_LOCAL_FIRST", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "sí",
+)
 PROMPT_FILE = BASE_DIR / "agent_prompt.txt"
 NOTES_DIR = BASE_DIR / "notes"
 NOTES_DIR.mkdir(exist_ok=True)
+# Medios y archivos guardados desde WhatsApp (panel /admin/inbox)
+WA_INBOX_ROOT = BASE_DIR / "wa_inbox"
+WA_INBOX_MEDIA = WA_INBOX_ROOT / "media"
 
 # Evolution API
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "").strip()   # ej: http://localhost:8080
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "").strip()   # apikey de Evolution
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "jarvis").strip()
+# URL publica de la pagina QR (opcional). Si esta vacio, el panel usa mismo origen + /evolution/
+# (servido por este bridge; ya no hace falta qr_server en 8099 salvo que quieras otro puerto).
+QR_WEB_PUBLIC_URL = os.getenv("QR_WEB_PUBLIC_URL", "").strip()
 
 # Números autorizados: formato 549XXXXXXXXXX (sin @s.whatsapp.net, sin +)
 # Separados por coma. Si está vacío, solo bloquea — SIEMPRE definir esto.
@@ -81,8 +127,11 @@ WHATSAPP_ALLOWED = set(WHATSAPP_ALLOWED_ORDERED)
 WHATSAPP_SELF_LID = os.getenv("WHATSAPP_SELF_LID", "").strip()
 
 # Número principal para contestar cuando `fromMe=True` (mensajes del dueño).
+_owner_phone_env = re.sub(r"\D", "", os.getenv("WHATSAPP_OWNER_PHONE", "").strip())
 WHATSAPP_PRIMARY_OWNER_PHONE = (
-    WHATSAPP_ALLOWED_ORDERED[0] if WHATSAPP_ALLOWED_ORDERED else "owner"
+    _owner_phone_env
+    if _owner_phone_env
+    else (WHATSAPP_ALLOWED_ORDERED[0] if WHATSAPP_ALLOWED_ORDERED else "owner")
 )
 
 # Algunos webhooks de Evolution entregan un `remoteJid`/`phone_norm` que no coincide
@@ -111,7 +160,7 @@ def _refresh_whatsapp_config_from_env() -> None:
     Relee .env y actualiza WHATSAPP_ALLOWED / WHATSAPP_PHONE_MAP en memoria.
     Usado por el panel admin para aplicar cambios sin reiniciar.
     """
-    global WHATSAPP_ALLOWED, WHATSAPP_PHONE_MAP
+    global WHATSAPP_ALLOWED, WHATSAPP_PHONE_MAP, WHATSAPP_PRIMARY_OWNER_PHONE
 
     # override=True para que tome valores nuevos del .env
     load_dotenv(BASE_DIR / ".env", override=True)
@@ -139,6 +188,17 @@ def _refresh_whatsapp_config_from_env() -> None:
                 phone_map[src_norm] = dst_norm
     WHATSAPP_PHONE_MAP = phone_map
 
+    owner_phone_env = re.sub(r"\D", "", os.getenv("WHATSAPP_OWNER_PHONE", "").strip())
+    if owner_phone_env:
+        WHATSAPP_PRIMARY_OWNER_PHONE = owner_phone_env
+    else:
+        allowed_ordered = [
+            re.sub(r"\D", "", n.strip())
+            for n in os.getenv("WHATSAPP_ALLOWED_NUMBERS", "").split(",")
+            if n.strip() and re.sub(r"\D", "", n.strip())
+        ]
+        WHATSAPP_PRIMARY_OWNER_PHONE = allowed_ordered[0] if allowed_ordered else "owner"
+
 # DRR
 DRR_API_BASE_URL = os.getenv("DRR_API_BASE_URL", "").strip()
 DRR_API_KEY = os.getenv("DRR_API_KEY", "").strip()
@@ -156,6 +216,187 @@ claude = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if (CLAUDE_API_KEY and anth
 BACKEND_NAME = "Gemini" if _has_gemini_text else "Claude"
 app = FastAPI(title="Jarvis WhatsApp Bridge", version="1.0")
 
+
+@app.middleware("http")
+async def jarvis_whatsapp_http_debug(request: Request, call_next):
+    """Registra cada request HTTP en ``logs/whatsapp_debug.log`` (ver WHATSAPP_DEBUG_LOG)."""
+    start = time.perf_counter()
+    path = request.url.path
+    if request.url.query:
+        path = f"{path}?{request.url.query}"
+    client = request.client.host if request.client else "?"
+    xf = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+    if xf:
+        client = xf.split(",", 1)[0].strip()
+    response = await call_next(request)
+    try:
+        log_http_request(
+            method=request.method,
+            path=path,
+            client_host=client,
+            status_code=response.status_code,
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    except Exception:
+        pass
+    return response
+
+
+@app.get("/j/ping")
+def j_bridge_ping() -> dict:
+    """Comprobación mínima: si esto da 404, este puerto no es el bridge actual."""
+    return {
+        "ok": True,
+        "service": "jarvis-whatsapp-bridge",
+        "evolution_instance_env": EVOLUTION_INSTANCE,
+        "evolution_api_configured": bool(EVOLUTION_API_URL and EVOLUTION_API_KEY),
+    }
+
+
+@app.post("/j/logout")
+async def j_logout_post(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.get("/j/logout")
+async def j_logout_get(
+    request: Request,
+    token: str = Query(default=""),
+    instance: str = Query(default=""),
+) -> JSONResponse:
+    body: dict = {"token": token}
+    if instance.strip():
+        body["instance"] = instance.strip()
+    raw = json.dumps(body).encode("utf-8")
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.post("/j/instances")
+async def j_evolution_instances(request: Request) -> JSONResponse:
+    """Lista instancias Evolution (misma clave AGENT_SECRET). Rutas cortas por si /admin/* no llega."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    token = str(body.get("token") or "").strip()
+    if not AGENT_SECRET:
+        return JSONResponse({"ok": False, "detail": "AGENT_SECRET no configurado"}, status_code=503)
+    if token != AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "Clave incorrecta (AGENT_SECRET)"},
+            status_code=403,
+        )
+    out = evolution_instances_for_panel()
+    return JSONResponse(content=out, status_code=200 if out.get("ok") else 502)
+
+
+@app.post("/j/debug-events")
+async def j_debug_events(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    token = str(body.get("token") or "").strip()
+    try:
+        limit = int(body.get("limit") or 80)
+    except (TypeError, ValueError):
+        limit = 80
+    if not AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "AGENT_SECRET no configurado en el servidor"},
+            status_code=503,
+        )
+    if token != AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "Clave incorrecta (usá el mismo valor que AGENT_SECRET)"},
+            status_code=403,
+        )
+    events = get_recent_debug_events(limit)
+    return JSONResponse({"ok": True, "events": events, "count": len(events)})
+
+
+@app.get("/evolution")
+def evolution_qr_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/evolution/", status_code=307)
+
+
+@app.get("/evolution/", response_class=HTMLResponse)
+def evolution_qr_page_view() -> HTMLResponse:
+    """
+    Misma UI que ``qr_server.py``: QR de Evolution + cerrar sesión, sin depender del puerto 8099.
+    Abrí: ``http://TU_IP:8766/evolution/``
+    """
+    return HTMLResponse(content=html_qr_page(api_prefix=API_PREFIX))
+
+
+@app.get("/evolution/api/qr")
+def evolution_qr_api_json() -> dict:
+    return build_api_qr_response()
+
+
+@app.post("/evolution/api/logout")
+async def evolution_qr_api_logout(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.get("/evolution/api/logout")
+async def evolution_qr_api_logout_get(request: Request, token: str = Query(default="")) -> JSONResponse:
+    """Mismo efecto que POST; util si el panel no puede hacer POST (proxy)."""
+    raw = json.dumps({"token": token}).encode("utf-8")
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+# Rutas muy cortas (ultimo recurso si /admin/... o /evolution/... no llegan al bridge por nginx).
+@app.post("/walogout")
+async def wa_logout_post(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.get("/walogout")
+async def wa_logout_get(request: Request, token: str = Query(default="")) -> JSONResponse:
+    raw = json.dumps({"token": token}).encode("utf-8")
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+# --- Misma página QR bajo /admin/whatsapp/... (mismo host que el panel; evita 404 si /evolution/ no llega al bridge) ---
+@app.get("/admin/whatsapp/evolution")
+def admin_whatsapp_evolution_qr_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/admin/whatsapp/evolution/", status_code=307)
+
+
+@app.get("/admin/whatsapp/evolution/", response_class=HTMLResponse)
+def admin_whatsapp_evolution_qr_page() -> HTMLResponse:
+    """
+    Duplicado de ``/evolution/``: abrí ``http://TU_IP:8766/admin/whatsapp/evolution/``
+    """
+    return HTMLResponse(content=html_qr_page(api_prefix=ADMIN_EVOLUTION_QR_API_PREFIX))
+
+
+@app.get("/admin/whatsapp/evolution/api/qr")
+def admin_whatsapp_evolution_qr_api_json() -> dict:
+    return build_api_qr_response()
+
+
+@app.post("/admin/whatsapp/evolution/api/logout")
+async def admin_whatsapp_evolution_qr_api_logout(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
 # =========================
 # ESTADO EN MEMORIA
 # =========================
@@ -166,9 +407,83 @@ _history: dict[str, list[dict]] = {}
 # Comandos pendientes de confirmación: phone → comando
 _pending_cmd: dict[str, str] = {}
 MAX_TURNS = 6  # últimas 6 rondas (12 mensajes)
-# Textos recién enviados por Jarvis — para no procesar el eco del fromMe propio
-_sent_texts: list[tuple[str, datetime]] = []
+# Textos recién enviados por Jarvis — para no procesar el eco del fromMe propio.
+# Guardamos también el jid para evitar falsos positivos entre chats distintos.
+_sent_texts: list[tuple[str, str, datetime]] = []
 _voice_busy: set[str] = set()
+# Última imagen por número (p. ej. tras BUSCAR_IMAGEN), para futuras ediciones tipo Telegram.
+_last_image_wa: dict[str, dict] = {}
+
+
+def _wa_phone_aliases(phone: str) -> set[str]:
+    """Variantes de dígitos del mismo usuario (p. ej. 11 vs 54… según WHATSAPP_PHONE_MAP)."""
+    p = re.sub(r"\D", "", phone or "")
+    if not p:
+        return set()
+    keys = {p}
+    mapped = WHATSAPP_PHONE_MAP.get(p)
+    if mapped:
+        keys.add(mapped)
+    for k, v in WHATSAPP_PHONE_MAP.items():
+        if v == p:
+            keys.add(k)
+    return keys
+
+
+def _last_image_wa_put(phone: str, payload: dict) -> None:
+    b = payload.get("bytes")
+    mt = (payload.get("mime_type") or "image/jpeg").strip() or "image/jpeg"
+    if not b:
+        return
+    for k in _wa_phone_aliases(phone):
+        _last_image_wa[k] = {"bytes": b, "mime_type": mt}
+
+
+def _last_image_wa_pick(phone: str) -> dict | None:
+    for k in _wa_phone_aliases(phone):
+        data = _last_image_wa.get(k)
+        if data and data.get("bytes"):
+            return data
+    return None
+# Último listado DRR mostrado (mismo orden que el texto: índice 1 = primer producto).
+_last_drr_products: dict[str, list[dict]] = {}
+
+
+def _last_drr_products_put(phone: str, snapshots: list[dict]) -> None:
+    """Replica el listado en todas las variantes de número (WHATSAPP_PHONE_MAP)."""
+    lst = list(snapshots) if snapshots else []
+    for k in _wa_phone_aliases(phone):
+        _last_drr_products[k] = lst
+    # Nuevo listado: el contexto de «última foto de catálogo» ya no coincide con los índices.
+    _last_drr_imagen_context_put(phone, None)
+
+
+# Último producto DRR del que se mostró imagen (para PATCH imagen tras edición).
+_last_drr_imagen_context: dict[str, dict] = {}
+
+
+def _last_drr_imagen_context_put(phone: str, ctx: dict | None) -> None:
+    for k in _wa_phone_aliases(phone):
+        if ctx:
+            _last_drr_imagen_context[k] = dict(ctx)
+        else:
+            _last_drr_imagen_context.pop(k, None)
+
+
+def _last_drr_imagen_context_pick(phone: str) -> dict | None:
+    for k in _wa_phone_aliases(phone):
+        c = _last_drr_imagen_context.get(k)
+        if c and c.get("codigo_id"):
+            return c
+    return None
+
+
+def _last_drr_products_pick(phone: str) -> list[dict]:
+    for k in _wa_phone_aliases(phone):
+        lst = _last_drr_products.get(k) or []
+        if lst:
+            return lst
+    return []
 
 
 def _session_ok(phone: str) -> bool:
@@ -188,6 +503,8 @@ def _system_prompt() -> str:
         "Sos Jarvis, asistente de servidor. Respondé siempre en español, breve y claro. "
         "Podés proponer comandos con ACCION: o CMD: (el usuario confirmará). "
         "Guardá notas con NOTA: y realizá búsquedas con BUSCAR:. "
+        "Si piden ver o listar notas guardadas, respondé solo con la línea LISTAR_NOTAS: "
+        "(nunca uses CMD: ni cat/ls sobre rutas inventadas como ~/.jarvis_notes.txt). "
         "Respetá estrictamente el formato de acciones ya definido para Jarvis."
     )
 
@@ -387,7 +704,9 @@ def _extract_base64_any(obj: object) -> str | None:
     return _walk(obj)
 
 
-def _evolution_download_media_base64(media_key_id: str, *, phone: str) -> bytes | None:
+def _evolution_download_media_base64(
+    media_key_id: str, *, phone: str, min_bytes: int = 1024
+) -> bytes | None:
     """
     Descarga media decodificable desde Evolution usando getBase64FromMediaMessage.
     Devuelve bytes (audio) o None si falla.
@@ -431,8 +750,13 @@ def _evolution_download_media_base64(media_key_id: str, *, phone: str) -> bytes 
             return None
 
         audio_bytes = base64.b64decode(base64_str, validate=False)
-        if len(audio_bytes) < 1024:
-            logger.warning("[%s] Audio (base64) demasiado chico: %s bytes", phone, len(audio_bytes))
+        if len(audio_bytes) < min_bytes:
+            logger.warning(
+                "[%s] Media (base64) demasiado chica: %s bytes (min=%s)",
+                phone,
+                len(audio_bytes),
+                min_bytes,
+            )
             return None
         return audio_bytes
     except Exception as e:
@@ -551,6 +875,54 @@ def _looks_like_valid_transcription(txt: str) -> bool:
     return True
 
 
+def _transcribe_whatsapp_audio(effective_path: str, phone: str, *, used_base64: bool) -> str | None:
+    """
+    Misma cadena que Telegram: N8N/multipart → `transcription_api` → `faster_whisper` en `transcribe_core`.
+    Si `WHATSAPP_TRANSCRIBE_LOCAL_FIRST=1`, se invierte el orden (útil si el webhook N8N falla o tarda).
+    Gemini solo como último recurso cuando `used_base64` (audio decodificado por Evolution).
+    """
+    import transcribe_core
+
+    def _local() -> str | None:
+        try:
+            t = transcribe_core.transcribe_voice(effective_path)
+            if t and t.strip() and t.strip() != "(sin voz detectada)":
+                return t.strip()
+        except Exception as e:
+            logger.exception("[%s] transcribe_core (faster_whisper) falló: %s", phone, e)
+        return None
+
+    def _api() -> str | None:
+        t = _transcribe_audio_via_api(effective_path, phone)
+        if t and t.strip() and t.strip() != "(sin voz detectada)":
+            return t.strip()
+        return None
+
+    def _gemini() -> str | None:
+        if not used_base64:
+            return None
+        g = _gemini_transcribe_audio(effective_path)
+        return g.strip() if g else None
+
+    if WHATSAPP_TRANSCRIBE_LOCAL_FIRST:
+        logger.info("[%s] Orden transcripción: Whisper local → N8N/API → Gemini", phone)
+        t = _local()
+        if t:
+            return t
+        t = _api()
+        if t:
+            return t
+        return _gemini()
+
+    t = _api()
+    if t:
+        return t
+    t = _local()
+    if t:
+        return t
+    return _gemini()
+
+
 def _ask_ai(text: str, phone: str) -> str:
     """
     Backend único de IA para WhatsApp.
@@ -561,24 +933,260 @@ def _ask_ai(text: str, phone: str) -> str:
     return _ask_claude(text, phone)
 
 
-def _send(jid: str, text: str) -> None:
-    """Envía un mensaje de texto via Evolution API."""
+def _build_evolution_quote(key: dict, message: dict) -> dict | None:
+    """
+    Construye el bloque `quoted` para sendText (Evolution).
+    Responder citando el mensaje entrante hace que el hilo sea el mismo en **móvil y PC**
+    (especialmente en el chat “contigo mismo” / @lid).
+    """
+    if not key or not key.get("id"):
+        return None
+    rj = (key.get("remoteJid") or "").strip()
+    mid = (key.get("id") or "").strip()
+    if not rj or not mid:
+        return None
+    msg_part: dict = {}
+    if isinstance(message, dict):
+        if message.get("conversation") is not None:
+            msg_part["conversation"] = str(message.get("conversation") or "")
+        elif message.get("extendedTextMessage"):
+            msg_part["extendedTextMessage"] = message["extendedTextMessage"]
+        elif message.get("audioMessage"):
+            msg_part["conversation"] = "[audio]"
+        else:
+            msg_part["conversation"] = ""
+    else:
+        msg_part["conversation"] = ""
+    return {
+        "key": {
+            "remoteJid": rj,
+            "fromMe": bool(key.get("fromMe")),
+            "id": mid,
+        },
+        "message": msg_part,
+    }
+
+
+def _send(jid: str, text: str, *, reply_quote: dict | None = None) -> None:
+    """Envía un mensaje de texto via Evolution API. `reply_quote` opcional para responder en el mismo hilo."""
     if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
         logger.warning("Evolution API no configurada; respuesta no enviada: %s", text[:80])
         return
     # Registrar para evitar procesar el eco fromMe
-    _sent_texts.append((text.strip(), datetime.now()))
+    _sent_texts.append((jid, text.strip(), datetime.now()))
     url = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
-    try:
+    def _post_once(target_jid: str) -> None:
+        # Evolution espera `number` en dígitos (54…); si mandamos JID completo a veces responde mal.
+        num_digits = re.sub(r"\D", "", target_jid.split("@", 1)[0] if target_jid else "")
+        if not num_digits:
+            raise ValueError(f"JID inválido para envío: {target_jid!r}")
+        body: dict = {"number": num_digits, "textMessage": {"text": text}}
+        if reply_quote:
+            body["quoted"] = reply_quote
         resp = httpx.post(
             url,
-            json={"number": jid, "textMessage": {"text": text}},
+            json=body,
             headers={"apikey": EVOLUTION_API_KEY},
             timeout=10,
         )
+        if resp.status_code >= 400:
+            logger.error(
+                "Evolution sendText HTTP %s number=%s body=%s",
+                resp.status_code,
+                num_digits,
+                (resp.text or "")[:900],
+            )
         resp.raise_for_status()
+
+    try:
+        _post_once(jid)
+        return
     except Exception as e:
         logger.error("Error enviando WhatsApp a %s: %s", jid, e)
+
+    # Fallback de compatibilidad: algunos números alternan entre formato local y 549...
+    # según el estado de la sesión en Evolution.
+    try:
+        if not jid.endswith("@s.whatsapp.net"):
+            return
+        num = jid.replace("@s.whatsapp.net", "")
+        alt = None
+        if num in WHATSAPP_PHONE_MAP:
+            alt = WHATSAPP_PHONE_MAP.get(num)
+        else:
+            for k, v in WHATSAPP_PHONE_MAP.items():
+                if v == num:
+                    alt = k
+                    break
+        if not alt or alt == num:
+            return
+        alt_jid = f"{alt}@s.whatsapp.net"
+        _post_once(alt_jid)
+        logger.info("Fallback de envío exitoso: %s -> %s", jid, alt_jid)
+    except Exception as e2:
+        logger.error("Fallback también falló para %s: %s", jid, e2)
+
+
+def _mime_for_image_bytes(image_bytes: bytes, file_name: str) -> str:
+    """MIME según firma de bytes o extensión (DALL·E suele PNG; Imagen puede variar)."""
+    if len(image_bytes) >= 8 and image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(image_bytes) >= 3 and image_bytes[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if file_name.lower().endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if file_name.lower().endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
+def _prepare_image_bytes_for_evolution(image_bytes: bytes, *, file_name: str) -> tuple[bytes, str]:
+    """
+    Evolution API suele rechazar o no mostrar en WhatsApp imágenes muy grandes en JSON base64.
+    Comprime JPEG si hace falta; alinea extensión con el tipo real (DRR = JPEG).
+    """
+    from io import BytesIO
+
+    mime = _mime_for_image_bytes(image_bytes, file_name)
+    max_payload = int(os.getenv("WHATSAPP_IMAGE_MAX_BYTES", "1800000"))
+    if mime != "image/jpeg" or len(image_bytes) <= max_payload:
+        return image_bytes, file_name
+
+    try:
+        from PIL import Image
+
+        im = Image.open(BytesIO(image_bytes))
+        im = im.convert("RGB")
+        out = BytesIO()
+        q = 88
+        data = image_bytes
+        while q >= 50:
+            out.seek(0)
+            out.truncate(0)
+            im.save(out, format="JPEG", quality=q, optimize=True)
+            data = out.getvalue()
+            if len(data) <= max_payload:
+                logger.info(
+                    "Imagen DRR comprimida para WhatsApp: %s → %s bytes (q=%s)",
+                    len(image_bytes),
+                    len(data),
+                    q,
+                )
+                return data, "producto_drr.jpg"
+            q -= 7
+        w, h = im.size
+        while len(data) > max_payload and min(w, h) > 400:
+            w = max(int(w * 0.82), 400)
+            h = max(int(h * 0.82), 400)
+            im2 = im.resize((w, h), Image.Resampling.LANCZOS)
+            out.seek(0)
+            out.truncate(0)
+            im2.save(out, format="JPEG", quality=80, optimize=True)
+            data = out.getvalue()
+            im = im2
+        logger.info(
+            "Imagen DRR redimensionada/comprimida para WhatsApp: %s bytes finales",
+            len(data),
+        )
+        return data, "producto_drr.jpg"
+    except Exception as e:
+        logger.warning("No se pudo comprimir JPEG para Evolution (%s); se intenta el original.", e)
+        return image_bytes, "producto_drr.jpg"
+
+
+def _send_media_image(jid: str, image_bytes: bytes, caption: str | None = None, file_name: str = "jarvis.png") -> bool:
+    """
+    Envía una imagen por Evolution API (POST /message/sendMedia/{instance}).
+
+    Varias builds de Evolution validan el cuerpo anidado `mediaMessage` (no el formato plano
+    de la doc v2 genérica). Sin ese objeto devuelve: instance requires property \"mediaMessage\".
+    """
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.warning("Evolution API no configurada; imagen no enviada")
+        return False
+    num = jid.replace("@s.whatsapp.net", "").replace("@g.us", "").lstrip("+")
+    num = re.sub(r"\D", "", num)
+    if not num:
+        return False
+    url = f"{EVOLUTION_API_URL.rstrip('/')}/message/sendMedia/{EVOLUTION_INSTANCE}"
+    headers = {"apikey": EVOLUTION_API_KEY}
+    caption_s = (caption or "")[:1024]
+    mime = _mime_for_image_bytes(image_bytes, file_name)
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    # Evolution valida enum en minúsculas: image | document | video | audio (no "Image").
+    mediatype = (os.getenv("WHATSAPP_EVOLUTION_MEDIATYPE", "image") or "image").strip().lower()
+    if mediatype not in ("image", "document", "video", "audio"):
+        mediatype = "image"
+    body = {
+        "number": num,
+        "mediaMessage": {
+            "mediatype": mediatype,
+            "mimetype": mime,
+            "caption": caption_s,
+            "media": b64,
+            "fileName": file_name,
+        },
+    }
+    try:
+        resp = httpx.post(url, json=body, headers=headers, timeout=120.0)
+        if resp.status_code >= 400:
+            logger.error(
+                "Evolution sendMedia HTTP %s: %s",
+                resp.status_code,
+                (resp.text or "")[:800],
+            )
+        resp.raise_for_status()
+        _sent_texts.append((jid, caption_s[:80], datetime.now()))
+        logger.info("Imagen enviada por WhatsApp a %s (%s bytes payload)", jid, len(image_bytes))
+        return True
+    except Exception as e:
+        logger.exception("Error enviando imagen WhatsApp a %s: %s", jid, e)
+        return False
+
+
+def _download_image_bytes(url: str) -> bytes | None:
+    """Descarga una imagen desde URL (User-Agent de navegador; APIs/CDN suelen bloquear bots)."""
+    try:
+        from drr.web_image_search import download_image_url
+
+        return download_image_url(url, max_bytes=20 * 1024 * 1024)
+    except Exception as e:
+        logger.warning("Error descargando imagen %s: %s", url[:60], e)
+        return None
+
+
+def _search_web_image_and_download_wa(
+    query: str,
+    max_size: int = 20 * 1024 * 1024,
+    *,
+    allow_ai_fallback: bool = False,
+) -> tuple[bytes | None, str]:
+    """BUSCAR_IMAGEN: DuckDuckGo. La generación IA solo si allow_ai_fallback (usuario lo pidió explícito)."""
+    from drr.web_image_search import search_web_image_bytes
+
+    img_bytes, mime = search_web_image_bytes(query, max_size=max_size)
+    if img_bytes:
+        return img_bytes, mime
+    if allow_ai_fallback and (GEMINI_API_KEY or OPENAI_API_KEY):
+        logger.info(
+            "BUSCAR_IMAGEN: sin resultados web para %r; respaldo con imagen generada (usuario pidió generación explícita)",
+            (query or "")[:80],
+        )
+        from drr.image_generate_env import generate_image_bytes_env
+
+        gen = generate_image_bytes_env(
+            f"Fotografía o ilustración realista, un solo encuadre claro, tema: {query}"
+        )
+        if gen:
+            return gen, "image/png"
+    return None, ""
+
+
+def _generate_image_bytes_wa(prompt: str) -> bytes | None:
+    """Genera imagen con Gemini Imagen o OpenAI DALL·E 3 (lee claves del entorno)."""
+    from drr.image_generate_env import generate_image_bytes_env
+
+    return generate_image_bytes_env(prompt)
 
 
 def _parse_product_prefs_from_user_text(user_text: str) -> dict:
@@ -588,6 +1196,7 @@ def _parse_product_prefs_from_user_text(user_text: str) -> dict:
       - limit (int | None)
       - include_prices (bool | None)
       - order (\"last_modified_desc\" | \"last_modified_asc\" | None)
+      - solo_lista_precio_id (int | None): si el usuario pide una sola lista de precio.
     """
     t = (user_text or "").lower()
 
@@ -631,7 +1240,33 @@ def _parse_product_prefs_from_user_text(user_text: str) -> dict:
         if any(kw in t for kw in ("asc", "viejos", "más viejos", "antigu")):
             order = "last_modified_asc"
 
-    return {"limit": limit, "include_prices": include_prices, "order": order}
+    solo_lista_precio_id = None
+    m_lp = re.search(
+        r"(?:lista\s+(?:de\s+)?precio|listaprecio|precio\s+lista)\s*(?:n[°º]?\s*|id\s*|#\s*)?(\d{1,4})\b",
+        t,
+    )
+    if m_lp:
+        try:
+            solo_lista_precio_id = int(m_lp.group(1))
+        except ValueError:
+            solo_lista_precio_id = None
+    if solo_lista_precio_id is None:
+        m_sl = re.search(
+            r"\b(?:solo|únicamente|unicamente|solamente)\s+(?:la\s+)?lista\s+(?:de\s+precio\s+)?(\d{1,4})\b",
+            t,
+        )
+        if m_sl:
+            try:
+                solo_lista_precio_id = int(m_sl.group(1))
+            except ValueError:
+                solo_lista_precio_id = None
+
+    return {
+        "limit": limit,
+        "include_prices": include_prices,
+        "order": order,
+        "solo_lista_precio_id": solo_lista_precio_id,
+    }
 
 
 def _extract_last_modified_dt(extra: dict) -> datetime | None:
@@ -723,47 +1358,332 @@ def _sort_products_by_last_modified(productos: list, order: str) -> list:
         return productos
 
 
-def _get_productos(
+def _query_drr_productos(
     descripcion: str = "",
     limit: int = 5,
     *,
     include_prices: bool = True,
     order: str | None = None,
-) -> str:
-    """Consulta la API DRR y devuelve productos formateados (con filtros)."""
+    solo_lista_precio_id: int | None = None,
+) -> tuple[str, list]:
+    """
+    Consulta la API DRR. Devuelve (texto formateado, lista de Producto en el orden mostrado).
+    La segunda lista tiene hasta `limit` ítems (para imagen del producto 1 = índice 1).
+    """
     if not DRR_API_BASE_URL:
-        return "(DRR no configurado)"
+        return "(DRR no configurado)", []
     try:
         from drr.api_client import DRRProductoAPIClient
+        from drr.formatter import linea_producto_resumen
 
         repo = DRRProductoAPIClient(DRR_API_BASE_URL, api_key=DRR_API_KEY or None, cache_ttl_seconds=25)
-        # Si ordenamos localmente por fecha, necesitamos traer más de "limit" para que el
-        # "top N" por fecha sea correcto (si el backend no soporta order explícito).
         fetch_limit = limit if order is None else max(limit, 50)
         productos = repo.listar(descripcion=descripcion or None, limit=fetch_limit)
         if not productos:
-            return f"(Sin productos encontrados para: {descripcion or 'todos'})"
+            return f"(Sin productos encontrados para: {descripcion or 'todos'})", []
 
         total = len(productos)
         out_list = productos
         if order in ("last_modified_desc", "last_modified_asc"):
             out_list = _sort_products_by_last_modified(productos, order)
 
-        lines = []
-        for p in out_list[:limit]:
-            linea = f"• {p.descripcion}"
-            if p.codigo_barras:
-                linea += f" | Cód: {p.codigo_barras}"
-            if include_prices and p.precio is not None:
-                linea += f" | ${p.precio:.2f}"
-            lines.append(linea)
+        shown = out_list[:limit]
+        nombres: dict[int, str] = {}
+        if include_prices:
+            from drr.lista_precios import nombres_listas_precio
 
-        result = "\n".join(lines)
+            nombres = nombres_listas_precio(DRR_API_BASE_URL, DRR_API_KEY or None)
+        lines = [
+            linea_producto_resumen(
+                p,
+                include_prices=include_prices,
+                nombres_lista_precio=nombres if include_prices else None,
+                solo_lista_precio_id=solo_lista_precio_id,
+            )
+            for p in shown
+        ]
+
+        result = "\n\n".join(lines)
         if total > limit:
-            result += f"\n_(mostrando {limit} de {total})_"
-        return result
+            result += f"\n\n_(mostrando {limit} de {total})_"
+        return result, shown
     except Exception as e:
-        return f"(Error DRR: {e})"
+        return f"(Error DRR: {e})", []
+
+
+def _get_productos(
+    descripcion: str = "",
+    limit: int = 5,
+    *,
+    include_prices: bool = True,
+    order: str | None = None,
+    solo_lista_precio_id: int | None = None,
+) -> str:
+    """Consulta la API DRR y devuelve solo el texto (compatibilidad)."""
+    text, _ = _query_drr_productos(
+        descripcion=descripcion,
+        limit=limit,
+        include_prices=include_prices,
+        order=order,
+        solo_lista_precio_id=solo_lista_precio_id,
+    )
+    return text
+
+
+def _send_drr_product_image_wa(jid: str, phone: str, idx_1based: int, send) -> bool:
+    """Envía la imagen del producto en la posición idx_1based del último listado DRR."""
+    snap_list = _last_drr_products_pick(phone)
+    if not snap_list:
+        send("❌ No tengo un listado de productos reciente. Pedime primero productos (ej. «traeme 5 martillos»).")
+        return False
+    if idx_1based < 1 or idx_1based > len(snap_list):
+        send(f"❌ En el último listado solo hay {len(snap_list)} producto(s). Pedí un número entre 1 y {len(snap_list)}.")
+        return False
+    row = snap_list[idx_1based - 1]
+    send("🖼 Descargando imagen del producto…")
+    from drr.api_client import fetch_product_image_bytes_for_snapshot
+
+    if not DRR_API_BASE_URL:
+        send("❌ DRR no está configurado (DRR_API_BASE_URL).")
+        return False
+    img_bytes = fetch_product_image_bytes_for_snapshot(
+        row,
+        base_url=DRR_API_BASE_URL,
+        api_key=DRR_API_KEY or None,
+    )
+    if not img_bytes:
+        send(
+            "ℹ️ Este producto no tiene imagen en el sistema DRR (o la referencia no se pudo descargar). "
+            "No genero imágenes de reemplazo; pedí otro producto o cargá la foto en el catálogo."
+        )
+        return False
+    img_ready, fname = _prepare_image_bytes_for_evolution(img_bytes, file_name="producto_drr.jpg")
+    desc = (row.get("descripcion") or "")[:180]
+    cap = f"Producto {idx_1based}: {desc}" if desc else f"Producto {idx_1based}"
+    if _send_media_image(jid, img_ready, caption=cap, file_name=fname):
+        mime = _mime_for_image_bytes(img_ready, fname)
+        _last_image_wa_put(phone, {"bytes": img_ready, "mime_type": mime})
+        try:
+            cid = int(row["id"])
+        except (TypeError, ValueError):
+            cid = None
+        if cid:
+            _last_drr_imagen_context_put(
+                phone,
+                {
+                    "codigo_id": cid,
+                    "idx": idx_1based,
+                    "descripcion": (row.get("descripcion") or "")[:220],
+                },
+            )
+        return True
+    send("❌ No pude enviar la imagen por WhatsApp.")
+    return False
+
+
+def _upload_drr_product_to_meta_catalog_wa(phone: str, idx_1based: int, send) -> None:
+    """
+    Toma el ítem ``idx_1based`` del último listado DRR en memoria y lo crea en el catálogo
+    de Meta (Graph API). No usa Evolution para el alta: solo envía HTTPS a graph.facebook.com.
+
+    Requiere META_ACCESS_TOKEN, META_PRODUCT_CATALOG_ID y una imagen con URL pública (ver ``drr/meta_catalog.py``).
+    """
+    from drr.meta_catalog import meta_catalog_upload_configured, upload_product_from_snapshot
+
+    if not DRR_API_BASE_URL:
+        send("❌ DRR no está configurado (DRR_API_BASE_URL).")
+        return
+    if not meta_catalog_upload_configured():
+        send(
+            "❌ Para subir productos al catálogo de WhatsApp hace falta configurar en el servidor "
+            "META_ACCESS_TOKEN y META_PRODUCT_CATALOG_ID (catálogo de Meta vinculado a tu negocio). "
+            "Ver comentarios en `drr/meta_catalog.py`."
+        )
+        return
+
+    snap_list = _last_drr_products_pick(phone)
+    if not snap_list:
+        send(
+            "❌ No tengo un listado de productos reciente. Pedime primero productos "
+            "(ej. «traeme 5 martillos») y después «subir el primer producto al catálogo»."
+        )
+        return
+    if idx_1based < 1 or idx_1based > len(snap_list):
+        send(f"❌ En el último listado solo hay {len(snap_list)} producto(s). Pedí un número entre 1 y {len(snap_list)}.")
+        return
+
+    row = snap_list[idx_1based - 1]
+    send(f"📤 Enviando producto {idx_1based} al catálogo Meta (WhatsApp)…")
+    ok, detail = upload_product_from_snapshot(row, drr_base_url=DRR_API_BASE_URL)
+    if ok:
+        send(f"✅ {detail}")
+    else:
+        send(f"❌ {detail}")
+
+
+def _save_last_image_to_drr_product_wa(jid: str, phone: str, save_idx: int, send) -> None:
+    """
+    PATCH /Producto con la última imagen en memoria.
+    save_idx: -1 = usar codigoID del último producto del que se mostró foto; >=1 = ítem del último listado.
+    """
+    if not DRR_API_BASE_URL:
+        send("❌ DRR no está configurado (DRR_API_BASE_URL).")
+        return
+    data = _last_image_wa_pick(phone)
+    if not data or not data.get("bytes"):
+        send("No tengo ninguna imagen reciente para guardar. Pedí la foto del producto, editá si querés, y volvé a pedir guardar.")
+        return
+
+    codigo_id: int | None = None
+    label = ""
+    if save_idx >= 1:
+        snap_list = _last_drr_products_pick(phone)
+        if not snap_list or save_idx > len(snap_list):
+            send(
+                f"❌ Para guardar en el producto {save_idx} necesito un listado reciente con al menos ese ítem. Pedime productos de nuevo."
+            )
+            return
+        row = snap_list[save_idx - 1]
+        try:
+            codigo_id = int(row["id"])
+        except (TypeError, ValueError):
+            codigo_id = None
+        label = (row.get("descripcion") or "")[:80]
+    else:
+        ctx = _last_drr_imagen_context_pick(phone)
+        if ctx:
+            try:
+                codigo_id = int(ctx["codigo_id"])
+            except (TypeError, ValueError):
+                codigo_id = None
+            label = str(ctx.get("descripcion") or "")[:80]
+
+    if not codigo_id:
+        send(
+            "No tengo un producto DRR asociado a esta imagen. "
+            "Pedime la imagen desde el listado (ej. «foto del primero»), editá si hace falta, y decime "
+            "«guardá la imagen en el producto» o «guardá los cambios»."
+        )
+        return
+
+    try:
+        from drr.api_client import DRRProductoAPIClient
+
+        client = DRRProductoAPIClient(
+            DRR_API_BASE_URL.rstrip("/"),
+            api_key=DRR_API_KEY or None,
+            timeout=60,
+        )
+        b64 = DRRProductoAPIClient.imagen_bytes_para_patch(data["bytes"])
+        send(f"💾 Guardando imagen en DRR (producto codigoID={codigo_id})…")
+        ok, detail = client.patch_producto({"codigoID": codigo_id, "imagen": b64})
+        if ok:
+            extra = f" ({label})" if label else ""
+            send(f"✅ Imagen actualizada en el producto{extra}. codigoID={codigo_id}.")
+            logger.info("[%s] DRR PATCH imagen OK codigoID=%s bytes=%s", phone, codigo_id, len(data["bytes"]))
+            return
+        send(f"❌ No se pudo guardar en DRR: {detail[:1500]}")
+    except Exception as e:
+        logger.exception("DRR PATCH imagen: %s", e)
+        send(f"❌ Error al guardar en DRR: {e}")
+
+
+def _do_edit_image_wa(jid: str, phone: str, prompt: str, send) -> None:
+    """Edita la última imagen con Gemini (Imagen edit + fallback modelo con salida de imagen)."""
+    if not GEMINI_API_KEY:
+        send("❌ Para editar imágenes hace falta GEMINI_API_KEY en el servidor.")
+        return
+    data = _last_image_wa_pick(phone)
+    if not data or not data.get("bytes"):
+        send(
+            "No tengo ninguna imagen reciente para editar. Pedí una imagen (DRR, búsqueda o generación) y después decime cómo editarla."
+        )
+        return
+    prompt = (prompt or "").strip()[:1000]
+    if not prompt:
+        send("Escribí qué cambio querés (ej: cambia el fondo a una playa).")
+        return
+    send("🖼 Editando imagen con Gemini…")
+    try:
+        from drr.gemini_image_edit import gemini_edit_image_bytes
+
+        img_bytes = data["bytes"]
+        mime = data.get("mime_type") or "image/png"
+        out_bytes = gemini_edit_image_bytes(
+            api_key=GEMINI_API_KEY,
+            image_bytes=img_bytes,
+            mime_type=mime,
+            prompt=prompt,
+        )
+        if out_bytes and _send_media_image(jid, out_bytes, caption=prompt[:200], file_name="jarvis_edit.png"):
+            _last_image_wa_put(phone, {"bytes": out_bytes, "mime_type": "image/png"})
+            return
+    except Exception as e:
+        logger.exception("Error editando imagen (WA): %s", e)
+        send(f"❌ No pude editar la imagen: {e}")
+        return
+    send("❌ No pude generar la imagen editada.")
+
+
+def _tts_mp3_bytes(text: str) -> bytes | None:
+    """TTS con edge-tts (misma voz que Telegram)."""
+    text = (text or "").strip()[:2000]
+    if not text:
+        return None
+    try:
+        import tempfile
+
+        import edge_tts
+
+        async def _save() -> bytes:
+            communicate = edge_tts.Communicate(text, voice="es-AR-ElenaNeural")
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                path = tmp.name
+            try:
+                await communicate.save(path)
+                return Path(path).read_bytes()
+            finally:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        return asyncio.run(_save())
+    except Exception as e:
+        logger.exception("Error TTS (WA): %s", e)
+        return None
+
+
+def _send_audio_whatsapp(jid: str, audio_bytes: bytes, file_name: str = "jarvis.mp3") -> bool:
+    """Envía un MP3 por Evolution (misma forma anidada que imágenes)."""
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.warning("Evolution API no configurada; audio no enviado")
+        return False
+    num = jid.replace("@s.whatsapp.net", "").replace("@g.us", "").lstrip("+")
+    num = re.sub(r"\D", "", num)
+    if not num:
+        return False
+    url = f"{EVOLUTION_API_URL.rstrip('/')}/message/sendMedia/{EVOLUTION_INSTANCE}"
+    headers = {"apikey": EVOLUTION_API_KEY}
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    body = {
+        "number": num,
+        "mediaMessage": {
+            "mediatype": "audio",
+            "mimetype": "audio/mpeg",
+            "caption": "",
+            "media": b64,
+            "fileName": file_name,
+        },
+    }
+    try:
+        resp = httpx.post(url, json=body, headers=headers, timeout=120.0)
+        resp.raise_for_status()
+        logger.info("Audio enviado por WhatsApp a %s (%s bytes)", jid, len(audio_bytes))
+        return True
+    except Exception as e:
+        logger.exception("Error enviando audio WhatsApp a %s: %s", jid, e)
+        return False
 
 
 def _run_command(cmd: str) -> str:
@@ -791,13 +1711,340 @@ def _search_web(query: str) -> str:
         return f"(Error al buscar: {e})"
 
 
-def _process_message(text: str, phone: str, jid: str) -> None:
+def _wa_inbox_ensure_dirs() -> None:
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    for sub in ("images", "videos", "documents", "audio"):
+        (WA_INBOX_MEDIA / sub).mkdir(parents=True, exist_ok=True)
+
+
+def _inbox_allowed_path(rel: str) -> Path | None:
+    """Devuelve Path resuelto bajo BASE_DIR solo si está en notes/ o wa_inbox/."""
+    rel = (rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    p = (BASE_DIR / rel).resolve()
+    try:
+        p.relative_to(BASE_DIR.resolve())
+    except ValueError:
+        return None
+    notes_r = NOTES_DIR.resolve()
+    inbox_r = WA_INBOX_ROOT.resolve()
+    try:
+        p.relative_to(notes_r)
+        return p
+    except ValueError:
+        pass
+    try:
+        p.relative_to(inbox_r)
+        return p
+    except ValueError:
+        return None
+
+
+def _inbox_kind_from_rel(rel: str) -> str:
+    r = rel.replace("\\", "/")
+    if r.startswith("notes/"):
+        return "note"
+    if "/images/" in r:
+        return "image"
+    if "/videos/" in r:
+        return "video"
+    if "/audio/" in r:
+        return "audio"
+    return "document"
+
+
+def _inbox_list_items() -> list[dict]:
+    _wa_inbox_ensure_dirs()
+    items: list[dict] = []
+    for root in (NOTES_DIR, WA_INBOX_MEDIA):
+        if not root.exists():
+            continue
+        for p in root.rglob("*"):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            try:
+                rel = str(p.relative_to(BASE_DIR)).replace("\\", "/")
+            except ValueError:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            items.append(
+                {
+                    "rel": rel,
+                    "kind": _inbox_kind_from_rel(rel),
+                    "name": p.name,
+                    "size": st.st_size,
+                    "mtime": int(st.st_mtime),
+                }
+            )
+    items.sort(key=lambda x: -x["mtime"])
+    return items
+
+
+def _sanitize_inbox_filename(name: str, default: str = "file") -> str:
+    base = Path(name or default).name
+    base = re.sub(r"[^\w.\-]+", "_", base).strip("._") or default
+    return base[:120]
+
+
+def _ext_from_mimetype(mime: str, fallback: str) -> str:
+    m = (mime or "").split(";")[0].strip().lower()
+    mp = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "audio/ogg": ".ogg",
+        "audio/mpeg": ".mp3",
+        "audio/mp4": ".m4a",
+        "application/pdf": ".pdf",
+    }
+    return mp.get(m, fallback)
+
+
+def _download_evolution_media_object_bytes(
+    media_obj: dict,
+    media_key_id: str,
+    phone: str,
+    *,
+    min_b64: int = 32,
+) -> bytes | None:
+    if media_key_id:
+        b = _evolution_download_media_base64(media_key_id, phone=phone, min_bytes=min_b64)
+        if b:
+            return b
+    media_url = None
+    for url_field in ("downloadUrl", "fileUrl", "mediaUrl", "url"):
+        val = media_obj.get(url_field)
+        if val:
+            media_url = val
+            break
+    if not media_url:
+        return None
+    headers: dict[str, str] = {}
+    if EVOLUTION_API_KEY:
+        headers["apikey"] = EVOLUTION_API_KEY
+    try:
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=httpx.Timeout(120.0, connect=20.0, read=120.0),
+        ) as client:
+            r = client.get(media_url, headers=headers)
+            r.raise_for_status()
+            data = r.content
+            if len(data) < min_b64:
+                return None
+            return data
+    except Exception as e:
+        logger.warning("[%s] GET media Evolution falló: %s", phone, e)
+        return None
+
+
+def _media_key_for_object(media_obj: dict, fallback_key: str) -> str:
+    ctx = media_obj.get("contextInfo") or {}
+    stanza = (ctx.get("stanzaId") or ctx.get("stanza_id") or "").strip()
+    return (fallback_key or stanza or "").strip()
+
+
+def _persist_whatsapp_inbox_media(message: dict, media_key_id: str, phone: str) -> str | None:
+    """
+    Guarda imagen / video / documento entrante en wa_inbox/media (sin pedir confirmación).
+    No maneja notas de voz (eso sigue el flujo de transcripción).
+    """
+    if message.get("audioMessage") or message.get("voiceMessage") or message.get("ptt"):
+        return None
+    doc = message.get("documentMessage") or {}
+    if isinstance(doc, dict) and (doc.get("mimetype") or "").lower().startswith("audio/"):
+        return None
+
+    _wa_inbox_ensure_dirs()
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    img = message.get("imageMessage")
+    if isinstance(img, dict) and img:
+        mk = _media_key_for_object(img, media_key_id)
+        raw = _download_evolution_media_object_bytes(img, mk, phone)
+        if not raw:
+            return None
+        mime = (img.get("mimetype") or "image/jpeg").lower()
+        ext = _ext_from_mimetype(mime, ".jpg")
+        fname = f"{ts}_{_sanitize_inbox_filename(img.get('fileName') or f'image{ext}', 'image')}"
+        if not fname.lower().endswith(ext):
+            fname += ext
+        dest = WA_INBOX_MEDIA / "images" / fname
+        dest.write_bytes(raw)
+        rel = str(dest.relative_to(BASE_DIR)).replace("\\", "/")
+        logger.info("[%s] Inbox imagen guardada %s (%s bytes)", phone, rel, len(raw))
+        return rel
+
+    vid = message.get("videoMessage")
+    if isinstance(vid, dict) and vid:
+        mk = _media_key_for_object(vid, media_key_id)
+        raw = _download_evolution_media_object_bytes(vid, mk, phone)
+        if not raw:
+            return None
+        mime = (vid.get("mimetype") or "video/mp4").lower()
+        ext = _ext_from_mimetype(mime, ".mp4")
+        fname = f"{ts}_{_sanitize_inbox_filename(vid.get('fileName') or f'video{ext}', 'video')}"
+        if not fname.lower().endswith(ext):
+            fname += ext
+        dest = WA_INBOX_MEDIA / "videos" / fname
+        dest.write_bytes(raw)
+        rel = str(dest.relative_to(BASE_DIR)).replace("\\", "/")
+        logger.info("[%s] Inbox video guardado %s (%s bytes)", phone, rel, len(raw))
+        return rel
+
+    if isinstance(doc, dict) and doc:
+        mk = _media_key_for_object(doc, media_key_id)
+        raw = _download_evolution_media_object_bytes(doc, mk, phone, min_b64=16)
+        if not raw:
+            return None
+        mime = (doc.get("mimetype") or "application/octet-stream").lower()
+        ext = _ext_from_mimetype(mime, Path(doc.get("fileName") or "").suffix or ".bin")
+        base_name = doc.get("fileName") or f"doc{ext}"
+        fname = f"{ts}_{_sanitize_inbox_filename(base_name, 'doc')}"
+        if not fname.lower().endswith(ext) and ext != ".bin":
+            fname += ext
+        dest = WA_INBOX_MEDIA / "documents" / fname
+        dest.write_bytes(raw)
+        rel = str(dest.relative_to(BASE_DIR)).replace("\\", "/")
+        logger.info("[%s] Inbox documento guardado %s (%s bytes)", phone, rel, len(raw))
+        return rel
+
+    return None
+
+
+def _inbox_copy_path_to_audio_subdir(src: Path, phone: str, original_name: str) -> str | None:
+    """Copia un archivo de audio ya descargado a wa_inbox/media/audio."""
+    try:
+        if not src.is_file():
+            return None
+        _wa_inbox_ensure_dirs()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suf = src.suffix.lower() or ".ogg"
+        dest_n = f"{ts}_{_sanitize_inbox_filename(original_name, 'voice')}"
+        if not dest_n.lower().endswith(suf):
+            dest_n += suf
+        dest = WA_INBOX_MEDIA / "audio" / dest_n
+        shutil.copy2(src, dest)
+        rel = str(dest.relative_to(BASE_DIR)).replace("\\", "/")
+        logger.info("[%s] Inbox audio archivado %s", phone, rel)
+        return rel
+    except Exception as e:
+        logger.warning("[%s] No se pudo archivar audio en inbox: %s", phone, e)
+        return None
+
+
+def _save_note_file(note_body: str) -> tuple[str, str]:
+    """Escribe nota en notes/note_*.txt. Devuelve (rel_path, nombre_archivo)."""
+    _wa_inbox_ensure_dirs()
+    body = (note_body or "").strip()
+    fname = f"note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    path = NOTES_DIR / fname
+    path.write_text(body, encoding="utf-8")
+    rel = str(path.relative_to(BASE_DIR)).replace("\\", "/")
+    return rel, fname
+
+
+def _format_notes_list_for_whatsapp(limit: int = 25) -> str:
+    _wa_inbox_ensure_dirs()
+    files = sorted(NOTES_DIR.glob("note_*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    if not files:
+        return "📋 No hay notas en el servidor (carpeta notes/). Podés guardar con: «guardame esto: …» o el modelo responde NOTA: …"
+    lines: list[str] = ["📋 Últimas notas:"]
+    for p in files:
+        try:
+            snippet = p.read_text(encoding="utf-8", errors="replace").strip().replace("\n", " ")[:180]
+        except OSError as e:
+            snippet = f"(error: {e})"
+        lines.append(f"• {p.name}\n  {snippet}")
+    lines.append("\nPanel web: /admin/inbox (mismo host que el bridge, token Bearer = ADMIN_PANEL_TOKEN).")
+    return "\n\n".join(lines)
+
+
+def _user_wants_list_notes(text: str) -> bool:
+    t = (text or "").lower().strip()
+    phrases = (
+        "mostrar notas",
+        "mostrame las notas",
+        "mostrame todas las notas",
+        "todas las notas",
+        "listar notas",
+        "listado de notas",
+        "ver notas",
+        "ver las notas",
+        "mis notas",
+        "notas guardadas",
+        "qué notas",
+        "que notas",
+        "cuales notas",
+        "cuáles notas",
+    )
+    return any(p in t for p in phrases)
+
+
+def _user_text_extract_save_note(text: str) -> str | None:
+    """
+    Si el usuario pide guardar una nota en lenguaje natural, devuelve el cuerpo; si no, None.
+    No requiere confirmación SI (evita CMD: cat ~/.jarvis_notes.txt u otras rutas inventadas).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    patterns = [
+        r"^(?:/nota)\s+(.+)$",
+        r"^(?:guardame|guardá|guarda)\s+esto\s*:\s*(.+)$",
+        r"^(?:anotá|anota|nota)\s*:\s*(.+)$",
+        r"^(?:guardar\s+nota|guardá\s+nota|guarda\s+nota)\s*:\s*(.+)$",
+        r"^(?:recordame|recordá|recuerdame|recuerda)\s*:\s*(.+)$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, raw, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+    # Frases tipo: guardame esto "..." o '...'
+    m2 = re.match(
+        r"^(?:guardame|guardá|guarda)\s+esto\s+[\"“](.+)[\"”]\s*$",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m2:
+        return m2.group(1).strip()
+    return None
+
+
+def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | None = None) -> None:
     """
     Procesa un mensaje de texto:
     - Verifica sesión / autenticación
     - Detecta confirmación de comandos pendientes (SI/NO)
-    - Llama a Claude y parsea prefijos NOTA:, ACCION:, CMD:, BUSCAR:
+    - Llama a la IA y parsea prefijos NOTA:, ACCION:, CMD:, PRODUCTOS:, BUSCAR_IMAGEN:, IMAGEN:, BUSCAR:
+    (Misma convención que `jarvis_bot.py` en Telegram.)
+
+    reply_quote: si viene del webhook (mensaje citado), Evolution encadena la respuesta y suele
+    verse bien también en el **celular** (chat contigo / LID).
     """
+
+    def send(msg: str) -> None:
+        _send(jid, msg, reply_quote=reply_quote)
+
+    # Remapeamos el `jid` para enviar usando el número que Evolution acepta.
+    # En algunos flujos (p.ej. al activar sesión) el webhook puede pasar un `jid`
+    # distinto al que Evolution permite enviar, y eso deja el cliente en
+    # "esperando mensaje" porque la respuesta no llega.
+    try:
+        phone_norm = re.sub(r"\D", "", phone or "")
+        if phone_norm and phone_norm in WHATSAPP_PHONE_MAP:
+            phone_send = WHATSAPP_PHONE_MAP.get(phone_norm, phone_norm)
+            if phone_send and jid and (phone_send != phone_norm):
+                jid = f"{phone_send}@s.whatsapp.net"
+    except Exception:
+        pass
 
     # --- Autenticación ---
     if not _session_ok(phone):
@@ -811,9 +2058,9 @@ def _process_message(text: str, phone: str, jid: str) -> None:
 
         if candidate == AGENT_SECRET:
             _open_session(phone)
-            _send(jid, f"✅ Sesión iniciada. Hola, soy Jarvis. Sesión válida por {SESSION_HOURS}h.")
+            send(f"✅ Sesión iniciada. Hola, soy Jarvis. Sesión válida por {SESSION_HOURS}h.")
         else:
-            _send(jid, "🔒 Ingresá la clave de acceso para usar Jarvis. Podés enviarla a pelo o como `/login TU_CLAVE`.")
+            send("🔒 Ingresá la clave de acceso para usar Jarvis. Podés enviarla a pelo o como `/login TU_CLAVE`.")
         return
 
     # --- Confirmación de comando pendiente ---
@@ -821,26 +2068,101 @@ def _process_message(text: str, phone: str, jid: str) -> None:
         cmd = _pending_cmd.pop(phone)
         if text.strip().upper() in ("SI", "SÍ", "S", "YES", "Y"):
             logger.info("[%s] Confirmación recibida; ejecutando CMD=%r", phone, cmd)
-            _send(jid, f"⚙️ Ejecutando: `{cmd}`")
+            send(f"⚙️ Ejecutando: `{cmd}`")
             output = _run_command(cmd)
             logger.info("[%s] Ejecutado. output_len=%s output_head=%r", phone, len(output or ""), (output or "")[:120])
-            _send(jid, f"✅ Resultado:\n```\n{output[:3000]}\n```")
+            send(f"✅ Resultado:\n```\n{output[:3000]}\n```")
         else:
-            _send(jid, "❌ Comando cancelado.")
+            send("❌ Comando cancelado.")
         return
+
+    # --- Notas del usuario: guardar / listar sin confirmación SI (no pasan por CMD:) ---
+    early_note = _user_text_extract_save_note(text)
+    if early_note:
+        _, fn = _save_note_file(early_note)
+        send(f"📝 Nota guardada ({fn}).\n\n{early_note[:3500]}")
+        return
+
+    if _user_wants_list_notes(text):
+        send(_format_notes_list_for_whatsapp())
+        return
+
+    # --- Guardar imagen (editada o no) en DRR vía PATCH /Producto (Swagger: ProductoPatchRequest) ---
+    save_idx = parse_save_image_to_drr_product_index(text.strip())
+    if save_idx is not None:
+        _save_last_image_to_drr_product_wa(jid, phone, save_idx, send)
+        return
+
+    # --- Subir un producto del listado DRR al catálogo de WhatsApp (Meta Graph API) ---
+    cat_idx = parse_upload_whatsapp_catalog_index(text.strip())
+    if cat_idx is not None:
+        _upload_drr_product_to_meta_catalog_wa(phone, cat_idx, send)
+        return
+
+    # --- Editar última imagen (paridad con Telegram /editarimagen) ---
+    edit_prompt_early = parse_edit_image_intent(text.strip())
+    if edit_prompt_early:
+        if _last_image_wa_pick(phone):
+            _do_edit_image_wa(jid, phone, edit_prompt_early, send)
+            return
+        logger.info(
+            "[%s] Intención EDITAR_IMAGEN sin última imagen en memoria (aliases=%s)",
+            phone,
+            sorted(_wa_phone_aliases(phone)),
+        )
+        send(
+            "No tengo la imagen anterior en memoria para editarla. "
+            "Volvé a pedir la imagen (búsqueda o generación) y enseguida la edición, "
+            "sin reiniciar el servidor del bridge entre mensajes."
+        )
+        return
+
+    # --- Imagen de un producto del último listado DRR (lenguaje natural) ---
+    # Debe ir ANTES del «seguimiento» de edición: frases como «poné la imagen del primer producto»
+    # matchean pon[eé] + imagen y no deben interpretarse como edición de la última foto.
+    idx_natural = parse_producto_imagen_index(text)
+    if idx_natural is not None and _last_drr_products_pick(phone):
+        _send_drr_product_image_wa(jid, phone, idx_natural, send)
+        return
+
+    # --- Seguimiento: ya hay última imagen y el usuario pide un cambio visual sin decir «editame la imagen» ---
+    if _last_image_wa_pick(phone) and not user_requested_ai_image_generation(text):
+        follow_edit = parse_followup_last_image_edit_intent(text)
+        if follow_edit:
+            _do_edit_image_wa(jid, phone, follow_edit, send)
+            return
 
     # --- IA de texto (Gemini preferido, luego Claude) ---
     logger.info("[%s] (%s) → %s", phone, BACKEND_NAME, text[:80])
     reply = _ask_ai(text, phone)
     logger.info("[%s] (%s) ← %s", phone, BACKEND_NAME, reply[:80])
 
+    # El modelo a veces responde con comando estilo Telegram (/editarimagen) en vez de IMAGEN:.
+    m_tg_edit = re.match(r"^/editarimagen\s+(.+)$", reply.strip(), flags=re.IGNORECASE | re.DOTALL)
+    if m_tg_edit:
+        edit_prompt = m_tg_edit.group(1).strip()
+        if _last_image_wa_pick(phone):
+            logger.info("[%s] Respuesta /editarimagen; ejecutando edición de última imagen.", phone)
+            _do_edit_image_wa(jid, phone, edit_prompt, send)
+            return
+        logger.info("[%s] /editarimagen sin última imagen en memoria", phone)
+        send(
+            "No tengo la imagen anterior en memoria para editarla. "
+            "Pedí de nuevo la imagen del producto y después la edición."
+        )
+        return
+
     # --- Parseo de prefijos especiales ---
 
     if reply.startswith("NOTA:"):
         note = reply.replace("NOTA:", "", 1).strip()
-        fname = BASE_DIR / "notes" / f"note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        fname.write_text(note, encoding="utf-8")
-        _send(jid, f"📝 Nota guardada:\n{note}")
+        _, fn = _save_note_file(note)
+        send(f"📝 Nota guardada ({fn}):\n{note}")
+        return
+
+    list_head = reply.strip().splitlines()[0].strip() if reply.strip() else ""
+    if list_head.upper().startswith("LISTAR_NOTAS"):
+        send(_format_notes_list_for_whatsapp())
         return
 
     # Comandos propuestos por el modelo.
@@ -865,16 +2187,14 @@ def _process_message(text: str, phone: str, jid: str) -> None:
         if cmd:
             _pending_cmd[phone] = cmd
             if action:
-                _send(
-                    jid,
+                send(
                     "⚠️ Jarvis quiere ejecutar:\n"
                     f"Acción: {action}\n"
                     f"CMD: `{cmd}`\n\n"
                     "Respondé *SI* para confirmar o cualquier otra cosa para cancelar.",
                 )
             else:
-                _send(
-                    jid,
+                send(
                     f"⚠️ Jarvis quiere ejecutar:\nCMD: `{cmd}`\n\n"
                     "Respondé *SI* para confirmar o cualquier otra cosa para cancelar.",
                 )
@@ -902,48 +2222,262 @@ def _process_message(text: str, phone: str, jid: str) -> None:
         if final_include_prices is None:
             final_include_prices = True
         final_order = prefs.get("order")
+        final_solo_lista = prefs.get("solo_lista_precio_id")
 
         logger.info(
-            "[%s] DRR filtros (from user audio/text): desc=%r limit=%s include_prices=%s order=%r",
+            "[%s] DRR filtros (from user audio/text): desc=%r limit=%s include_prices=%s order=%r solo_lista=%s",
             phone,
             desc,
             final_limit,
             final_include_prices,
             final_order,
+            final_solo_lista,
         )
 
-        _send(jid, f"📦 Buscando productos: {desc or 'todos'} (limit={final_limit})...")
-        resultado = _get_productos(
+        send(f"📦 Buscando productos: {desc or 'todos'} (limit={final_limit})...")
+        resultado, shown = _query_drr_productos(
             descripcion=desc,
             limit=final_limit,
             include_prices=final_include_prices,
             order=final_order,
+            solo_lista_precio_id=final_solo_lista,
         )
-        _send(jid, f"📦 Productos DRR:\n{resultado}")
+        if shown:
+            _last_drr_products_put(phone, [p.to_snapshot() for p in shown])
+        else:
+            _last_drr_products_put(phone, [])
+        out_msg = f"📦 Productos DRR:\n{resultado}"
+        if shown:
+            out_msg += (
+                "\n\n_Para ver la imagen guardada en la API de un producto, escribí por ejemplo: "
+                "«imagen del producto 1» o «foto del primero»._"
+            )
+            # Catálogo Meta (opcional): si está configurado en el servidor, mostramos el comando.
+            try:
+                from drr.meta_catalog import meta_catalog_upload_configured
+
+                if meta_catalog_upload_configured():
+                    out_msg += (
+                        "\n\n_Para subir un ítem de este listado al catálogo de WhatsApp (Meta), "
+                        "por ejemplo: «subir el primer producto al catálogo» o «publicar producto 2 en whatsapp»._"
+                    )
+            except Exception:
+                pass
+        send(out_msg)
         return
+
+    # --- Imágenes (alineado a Telegram: búsqueda web o generación IA) ---
+    if "BUSCAR_IMAGEN:" in reply:
+        m_img = re.search(r"BUSCAR_IMAGEN:\s*(.+)", reply, re.DOTALL)
+        if m_img:
+            query_img = m_img.group(1).strip().split("\n")[0].strip()
+            if query_img:
+                send("🔍 Buscando imagen en internet...")
+                img_bytes, _mime = _search_web_image_and_download_wa(
+                    query_img,
+                    allow_ai_fallback=user_requested_ai_image_generation(text),
+                )
+                if img_bytes:
+                    _last_image_wa_put(phone, {"bytes": img_bytes, "mime_type": _mime or "image/jpeg"})
+                    _last_drr_imagen_context_put(phone, None)
+                    if _send_media_image(jid, img_bytes, caption=f"Búsqueda: {query_img[:200]}"):
+                        pass
+                    return
+                send(
+                    "No encontré imágenes en la web para esa búsqueda. "
+                    "Probá otra frase. "
+                    "(No genero imágenes por IA salvo que pidas explícitamente «generame una imagen …».)"
+                )
+                return
+
+    if "IMAGEN:" in reply:
+        m_gen = re.search(r"IMAGEN:\s*(.+)", reply, re.DOTALL)
+        if m_gen:
+            prompt_imagen = m_gen.group(1).strip()
+            # Evitar prompts basura cuando el modelo mezcla ayuda / otros prefijos
+            if any(
+                x in prompt_imagen
+                for x in ("AUDIO:", "BUSCAR:", "CMD:", "NOTA:", "Logs", "Proyectos", "descripción detallada")
+            ):
+                send(reply[:4000])
+                return
+            explicit_gen = user_requested_ai_image_generation(text)
+            last_img = _last_image_wa_pick(phone)
+            if not explicit_gen and last_img:
+                logger.info(
+                    "[%s] Modelo devolvió IMAGEN: pero el usuario no pidió generación explícita; "
+                    "interpretando como edición de la última imagen.",
+                    phone,
+                )
+                _do_edit_image_wa(jid, phone, prompt_imagen[:1000], send)
+                return
+            if not explicit_gen:
+                send(
+                    "No genero imágenes nuevas a menos que lo pidas explícitamente "
+                    "(por ejemplo: «generame una imagen de un gato sentado»). "
+                    "Si querés modificar la última foto que te mandé, describí el cambio "
+                    "(centrá el producto, agregá texto, etc.)."
+                )
+                return
+            if not GEMINI_API_KEY and not OPENAI_API_KEY:
+                send("❌ Falta API de imagen: configurá GEMINI_API_KEY u OPENAI_API_KEY en .env (igual que Telegram).")
+                return
+            send("🖼 Generando imagen...")
+            out = _generate_image_bytes_wa(prompt_imagen)
+            if out and _send_media_image(jid, out, caption=prompt_imagen[:200]):
+                _last_image_wa_put(phone, {"bytes": out, "mime_type": "image/png"})
+                _last_drr_imagen_context_put(phone, None)
+                return
+            send("❌ No se pudo generar la imagen.")
+            return
+
+    if "PRODUCTO_IMAGEN:" in reply.upper():
+        m_pi = re.search(r"PRODUCTO_IMAGEN:\s*(\d+)", reply, flags=re.IGNORECASE)
+        if m_pi:
+            try:
+                n = int(m_pi.group(1))
+            except Exception:
+                n = 0
+            if n > 0:
+                _send_drr_product_image_wa(jid, phone, n, send)
+                return
+
+    if "AUDIO:" in reply:
+        m_au = re.search(r"AUDIO:\s*(.+)", reply, re.DOTALL)
+        if m_au:
+            texto_audio = m_au.group(1).strip()
+            if any(
+                x in texto_audio
+                for x in ("IMAGEN:", "BUSCAR:", "CMD:", "NOTA:", "Logs", "Proyectos", "descripción detallada")
+            ):
+                send(reply[:4000])
+                return
+            send("🔊 Generando audio...")
+            mp3 = _tts_mp3_bytes(texto_audio)
+            if mp3 and _send_audio_whatsapp(jid, mp3):
+                return
+            send("❌ No se pudo generar o enviar el audio.")
+            return
 
     if reply.startswith("BUSCAR:"):
         query = reply.replace("BUSCAR:", "", 1).strip()
-        _send(jid, f"🔍 Buscando: {query}...")
+        send(f"🔍 Buscando: {query}...")
         results = _search_web(query)
         prompt = (
             f"Resultados de búsqueda para '{query}':\n\n{results}\n\n"
             "Resumí o respondé en español según esta información."
         )
         final = _ask_ai(prompt, phone)
-        _send(jid, final[:4000])
+        send(final[:4000])
         return
 
     # Respuesta normal
-    _send(jid, reply[:4000])
+    send(reply[:4000])
 
 
 # =========================
 # ENDPOINTS
 # =========================
 
+
+def _evolution_logout_apply_token(
+    token: str, request: Request | None = None, instance: str = ""
+) -> JSONResponse:
+    """Respuesta JSON de logout Evolution; marca evolution_logout_applied para el panel."""
+    if not (token or "").strip():
+        return JSONResponse(
+            {"ok": False, "detail": "Falta ?token= (AGENT_SECRET)"},
+            status_code=400,
+        )
+    body: dict = {"token": token.strip()}
+    if (instance or "").strip():
+        body["instance"] = instance.strip()
+    raw = json.dumps(body).encode("utf-8")
+    hdrs = dict(request.headers) if request is not None else None
+    code, payload = handle_logout_post_body(raw, hdrs)
+    if isinstance(payload, dict):
+        payload["evolution_logout_applied"] = True
+    return JSONResponse(content=payload, status_code=code)
+
+
+async def _evolution_logout_from_request_body(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    if isinstance(payload, dict):
+        payload["evolution_logout_applied"] = True
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.get("/evo-logout")
+def evolution_logout_via_query(
+    request: Request,
+    token: str = Query(default="", description="Misma clave que AGENT_SECRET"),
+    instance: str = Query(default="", description="Nombre instancia Evolution (opcional)"),
+):
+    """
+    Solo cierra sesión en Evolution (sin mezclar con el JSON de /status).
+    Usá: GET /evo-logout?token=AGENT_SECRET
+    """
+    return _evolution_logout_apply_token(token, request, instance)
+
+
+@app.post("/evo-logout")
+async def evolution_logout_via_post(request: Request) -> JSONResponse:
+    return await _evolution_logout_from_request_body(request)
+
+
+# Mismas rutas bajo /admin: muchos nginx solo proxy_pass /admin/ al bridge ( /evo-logout da 404 ).
+@app.get("/admin/evo-logout")
+def admin_prefix_evo_logout_get(
+    request: Request, token: str = Query(default=""), instance: str = Query(default="")
+) -> JSONResponse:
+    return _evolution_logout_apply_token(token, request, instance)
+
+
+@app.post("/admin/evo-logout")
+async def admin_prefix_evo_logout_post(request: Request) -> JSONResponse:
+    return await _evolution_logout_from_request_body(request)
+
+
+@app.get("/admin/whatsapp/evo-logout")
+def admin_whatsapp_evo_logout_get(
+    request: Request, token: str = Query(default=""), instance: str = Query(default="")
+) -> JSONResponse:
+    return _evolution_logout_apply_token(token, request, instance)
+
+
+@app.post("/admin/whatsapp/evo-logout")
+async def admin_whatsapp_evo_logout_post(request: Request) -> JSONResponse:
+    return await _evolution_logout_from_request_body(request)
+
+
 @app.get("/status")
-def status():
+def status(request: Request):
+    """
+    Health check habitual (nginx suele dejar pasar GET /status aunque filtre otras rutas).
+
+    Logout de Evolution (mismo cuerpo que /walogout) por query, para entornos donde
+    POST a /admin/... o /walogout devuelve 404 desde el proxy:
+      GET /status?evolution_logout=1&token=AGENT_SECRET
+    """
+    q = request.query_params
+    evo_flag = (q.get("evolution_logout") or q.get("evo_logout") or "").strip().lower()
+    tok = (q.get("token") or "").strip()
+    if evo_flag in ("1", "true", "yes"):
+        if not tok:
+            return JSONResponse(
+                {"ok": False, "detail": "Falta token en la URL (?token=AGENT_SECRET)"},
+                status_code=400,
+            )
+        inst_q = (q.get("instance") or "").strip()
+        body_s: dict = {"token": tok}
+        if inst_q:
+            body_s["instance"] = inst_q
+        raw = json.dumps(body_s).encode("utf-8")
+        code, payload = handle_logout_post_body(raw, dict(request.headers))
+        if isinstance(payload, dict):
+            payload["evolution_logout_applied"] = True
+        return JSONResponse(content=payload, status_code=code)
     return {
         "ok": True,
         "backend": BACKEND_NAME,
@@ -953,21 +2487,39 @@ def status():
         "instance": EVOLUTION_INSTANCE,
         "allowed_numbers": len(WHATSAPP_ALLOWED) if WHATSAPP_ALLOWED else "⚠ ninguno definido",
         "active_sessions": len([p for p, exp in _sessions.items() if datetime.now() < exp]),
+        "whatsapp_transcribe_local_first": WHATSAPP_TRANSCRIBE_LOCAL_FIRST,
+        "openai_configured": bool(OPENAI_API_KEY),
+        # Si falta, el proceso en el VPS es viejo: el panel de logout devolverá 404 en todas las rutas.
+        "bridge_features": {
+            "evolution_logout_routes": True,
+            "evolution_qr_admin": True,
+            "debug_events_post": True,
+            "evolution_instances_post": True,
+            "short_routes_j": True,
+            "admin_inbox_panel": True,
+            "admin_server_panel": True,
+        },
+        "whatsapp_debug_log": str(LOG_FILE),
+        "whatsapp_debug_log_enabled": debug_log_enabled(),
     }
+
+
+def _admin_token_from_request(request: Request) -> str:
+    """Bearer, X-Admin-Token o ?token= (útil para <img src> en el panel inbox)."""
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    hdr = request.headers.get("x-admin-token") or request.headers.get("X-Admin-Token") or ""
+    if hdr.strip():
+        return hdr.strip()
+    return (request.query_params.get("token") or "").strip()
 
 
 def _require_admin(request: Request) -> None:
     """
     Protege el panel admin con token simple (Bearer).
     """
-    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
-    token = ""
-    if auth.lower().startswith("bearer "):
-        token = auth[7:].strip()
-    else:
-        # fallback: por si el cliente usa X-Admin-Token
-        token = request.headers.get("x-admin-token") or request.headers.get("X-Admin-Token") or ""
-
+    token = _admin_token_from_request(request)
     if not token or token != ADMIN_PANEL_TOKEN:
         raise HTTPException(status_code=401, detail="unauthorized")
 
@@ -1051,15 +2603,310 @@ def _tail_text_lines(path: Path, limit: int = 2000) -> list[str]:
     return list(reversed(lines))
 
 
+@app.post("/admin/whatsapp/api/evolution-instances")
+async def admin_whatsapp_api_evolution_instances(request: Request) -> JSONResponse:
+    """
+    Lista instancias en Evolution (nombre, estado). Misma clave ``AGENT_SECRET``.
+    Sirve para ver qué sesión está «open» y si coincide con ``EVOLUTION_INSTANCE`` del .env.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    token = str(body.get("token") or "").strip()
+    if not AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "AGENT_SECRET no configurado en el servidor"},
+            status_code=503,
+        )
+    if token != AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "Clave incorrecta (usá el mismo valor que AGENT_SECRET)"},
+            status_code=403,
+        )
+    out = evolution_instances_for_panel()
+    return JSONResponse(content=out, status_code=200 if out.get("ok") else 502)
+
+
+@app.post("/admin/whatsapp/api/debug-events")
+async def admin_whatsapp_api_debug_events(request: Request) -> JSONResponse:
+    """
+    Últimos eventos de diagnóstico (HTTP, Evolution, logout) en memoria.
+    Misma clave que AGENT_SECRET (no hace falta SSH ni abrir archivos).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    token = str(body.get("token") or "").strip()
+    try:
+        limit = int(body.get("limit") or 80)
+    except (TypeError, ValueError):
+        limit = 80
+    if not AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "AGENT_SECRET no configurado en el servidor"},
+            status_code=503,
+        )
+    if token != AGENT_SECRET:
+        return JSONResponse(
+            {"ok": False, "detail": "Clave incorrecta (usá el mismo valor que AGENT_SECRET)"},
+            status_code=403,
+        )
+    events = get_recent_debug_events(limit)
+    return JSONResponse({"ok": True, "events": events, "count": len(events)})
+
+
+@app.get("/admin/whatsapp/api/evolution-qr")
+def admin_whatsapp_api_evolution_qr() -> dict:
+    """
+    JSON del QR Evolution (misma respuesta que ``/evolution/api/qr``).
+    Sin Bearer: el panel HTML público puede refrescar el QR; el logout sigue pidiendo token en POST.
+    """
+    return build_api_qr_response()
+
+
+@app.post("/admin/whatsapp/api/evolution-logout")
+@app.post("/admin/whatsapp/api/evolution_logout")
+@app.post("/admin/whatsapp/api/evolution/logout")
+async def admin_whatsapp_api_evolution_logout(request: Request) -> JSONResponse:
+    raw = await request.body()
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+@app.get("/admin/whatsapp/api/evolution-logout")
+async def admin_whatsapp_api_evolution_logout_get(
+    request: Request,
+    token: str = Query(default="", description="Misma clave que AGENT_SECRET"),
+    instance: str = Query(default="", description="Instancia Evolution (opcional)"),
+) -> JSONResponse:
+    """
+    Mismo efecto que el POST, por si un proxy bloquea POST con JSON.
+    Ojo: el token queda en la URL (historial, logs del proxy); preferí POST cuando funcione.
+    """
+    body_l: dict = {"token": token}
+    if (instance or "").strip():
+        body_l["instance"] = instance.strip()
+    raw = json.dumps(body_l).encode("utf-8")
+    code, payload = handle_logout_post_body(raw, dict(request.headers))
+    return JSONResponse(content=payload, status_code=code)
+
+
+def _wa_api_dispatch(
+    op: str,
+    *,
+    token: str,
+    instance: str,
+    limit: int,
+    headers: dict[str, str],
+) -> JSONResponse:
+    """
+    API embebida en ``/admin/whatsapp`` (query o POST) para cuando un proxy solo deja pasar
+    esa ruta y devuelve 404 en ``/admin/whatsapp/api/*``.
+    """
+    op = (op or "").strip().lower()
+    hdrs = headers
+    if op in ("ping", "j-ping", "bridge-ping"):
+        return JSONResponse(
+            {
+                "ok": True,
+                "service": "jarvis-whatsapp-bridge",
+                "via": "wa_same_url_fallback",
+                "evolution_instance_env": EVOLUTION_INSTANCE,
+                "evolution_api_configured": bool(EVOLUTION_API_URL and EVOLUTION_API_KEY),
+            }
+        )
+    if op == "evolution-qr":
+        return JSONResponse(build_api_qr_response())
+    if op == "evolution-logout":
+        body_l: dict = {"token": token.strip()}
+        if (instance or "").strip():
+            body_l["instance"] = instance.strip()
+        raw = json.dumps(body_l).encode("utf-8")
+        code, payload = handle_logout_post_body(raw, hdrs)
+        return JSONResponse(content=payload, status_code=code)
+    if op == "debug-events":
+        if not AGENT_SECRET:
+            return JSONResponse(
+                {"ok": False, "detail": "AGENT_SECRET no configurado en el servidor"},
+                status_code=503,
+            )
+        if token.strip() != AGENT_SECRET:
+            return JSONResponse(
+                {"ok": False, "detail": "Clave incorrecta (AGENT_SECRET)"},
+                status_code=403,
+            )
+        lim = max(1, min(int(limit or 80), 500))
+        events = get_recent_debug_events(lim)
+        return JSONResponse({"ok": True, "events": events, "count": len(events)})
+    if op == "evolution-instances":
+        if not AGENT_SECRET:
+            return JSONResponse({"ok": False, "detail": "AGENT_SECRET no configurado"}, status_code=503)
+        if token.strip() != AGENT_SECRET:
+            return JSONResponse(
+                {"ok": False, "detail": "Clave incorrecta (AGENT_SECRET)"},
+                status_code=403,
+            )
+        out = evolution_instances_for_panel()
+        return JSONResponse(content=out, status_code=200 if out.get("ok") else 502)
+    return JSONResponse({"ok": False, "detail": f"wa_op desconocido: {op}"}, status_code=400)
+
+
+def _try_wa_query_api(request: Request) -> JSONResponse | None:
+    q = request.query_params
+    if (q.get("wa_json") or "").strip().lower() not in ("1", "true", "yes"):
+        return None
+    op = (q.get("wa_op") or "").strip()
+    token = (q.get("wa_token") or q.get("token") or "").strip()
+    instance = (q.get("wa_instance") or q.get("instance") or "").strip()
+    try:
+        limit = int(q.get("limit") or "80")
+    except (TypeError, ValueError):
+        limit = 80
+    hdrs = {str(k): str(v) for k, v in request.headers.items()}
+    return _wa_api_dispatch(op, token=token, instance=instance, limit=limit, headers=hdrs)
+
+
+@app.post("/admin/whatsapp")
+async def admin_whatsapp_wa_op_post(request: Request) -> JSONResponse:
+    """
+    Misma API que ``wa_json``+``wa_op`` en GET, pero por POST (token no va en la URL).
+    Cuerpo: ``{"wa_op":"evolution-logout","token":"...","instance":"opcional"}``
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "detail": "JSON inválido"}, status_code=400)
+    if not isinstance(body, dict) or not (body.get("wa_op") or "").strip():
+        return JSONResponse(
+            {"ok": False, "detail": 'Usá /admin/whatsapp/api/... o enviá JSON con "wa_op"'},
+            status_code=404,
+        )
+    op = str(body.get("wa_op")).strip()
+    token = str(body.get("token") or body.get("wa_token") or "").strip()
+    instance = str(body.get("instance") or body.get("wa_instance") or "").strip()
+    try:
+        limit = int(body.get("limit") or 80)
+    except (TypeError, ValueError):
+        limit = 80
+    hdrs = {str(k): str(v) for k, v in request.headers.items()}
+    return _wa_api_dispatch(op, token=token, instance=instance, limit=limit, headers=hdrs)
+
+
 @app.get("/admin/whatsapp")
 def admin_whatsapp_page(request: Request):
+    q_api = _try_wa_query_api(request)
+    if q_api is not None:
+        return q_api
     # El panel frontend se autentica desde el browser, pero igual sirve la pagina sin token.
     # Si queres proteccion a nivel server (bloqueo), agregame _require_admin aqui.
     panel_path = BASE_DIR / "admin_whatsapp_panel_v2.html"
     if panel_path.exists():
-        return HTMLResponse(panel_path.read_text(encoding="utf-8", errors="ignore"))
+        panel_html = panel_path.read_text(encoding="utf-8", errors="ignore")
+        # Inyecta URL del QR (qr_server); si no hay env, el JS del panel usa location.hostname:8099.
+        inj = f"<script>window.__QR_WEB_PUBLIC_URL__ = {json.dumps(QR_WEB_PUBLIC_URL)};</script>"
+        panel_html = panel_html.replace("<!-- QR_WEB_PUBLIC_URL_INJECT -->", inj, 1)
+        dbg = (
+            "<p class=\"text-secondary small mb-2\">Todo desde esta URL: con tu <strong>AGENT_SECRET</strong> usá el botón "
+            "<strong>Ver diagnóstico</strong> (abajo) para ver actividad reciente sin entrar al servidor. "
+            "Opcional en disco: <code class=\"mono\">"
+            + html.escape(str(LOG_FILE))
+            + "</code> si <code>WHATSAPP_DEBUG_LOG=1</code>.</p>"
+        )
+        panel_html = panel_html.replace("<!-- WHATSAPP_DEBUG_LOG_INJECT -->", dbg, 1)
+        return HTMLResponse(panel_html)
     # fallback
     return HTMLResponse("<h3>Panel admin no disponible (archivo html no encontrado).</h3>", status_code=404)
+
+
+@app.get("/admin/inbox")
+def admin_inbox_page() -> HTMLResponse:
+    panel_path = BASE_DIR / "admin_inbox_panel.html"
+    if panel_path.exists():
+        return HTMLResponse(panel_path.read_text(encoding="utf-8", errors="ignore"))
+    return HTMLResponse("<h3>Panel inbox no disponible (falta admin_inbox_panel.html).</h3>", status_code=404)
+
+
+@app.get("/admin/inbox/api/items")
+def admin_inbox_api_items(request: Request) -> dict:
+    _require_admin(request)
+    items = _inbox_list_items()
+    out = []
+    for it in items:
+        row = dict(it)
+        row["mtime_iso"] = datetime.fromtimestamp(it["mtime"]).isoformat(timespec="seconds")
+        out.append(row)
+    return {"ok": True, "items": out}
+
+
+@app.get("/admin/inbox/api/raw")
+def admin_inbox_api_raw(request: Request, rel: str = "", token: str = "") -> FileResponse:
+    _require_admin(request)
+    p = _inbox_allowed_path(rel)
+    if not p or not p.is_file():
+        raise HTTPException(status_code=404, detail="archivo no encontrado")
+    return FileResponse(path=str(p), filename=p.name)
+
+
+@app.post("/admin/inbox/api/delete")
+def admin_inbox_api_delete(request: Request, payload: dict) -> dict:
+    _require_admin(request)
+    rels = payload.get("rels") if isinstance(payload, dict) else None
+    if not isinstance(rels, list):
+        raise HTTPException(status_code=400, detail='Enviá JSON {"rels": ["notes/archivo.txt"]}')
+    deleted: list[str] = []
+    for rel in rels:
+        srel = str(rel).replace("\\", "/").lstrip("/")
+        p = _inbox_allowed_path(srel)
+        if p and p.is_file():
+            try:
+                p.unlink()
+                deleted.append(srel)
+            except OSError:
+                pass
+    return {"ok": True, "deleted": deleted}
+
+
+@app.put("/admin/inbox/api/note")
+def admin_inbox_api_note_put(request: Request, payload: dict) -> dict:
+    _require_admin(request)
+    rel = str((payload or {}).get("rel") or "").replace("\\", "/").lstrip("/")
+    content = (payload or {}).get("content")
+    if content is None:
+        raise HTTPException(status_code=400, detail="falta content")
+    if not rel.startswith("notes/") or not rel.lower().endswith(".txt"):
+        raise HTTPException(status_code=400, detail="solo se editan archivos .txt bajo notes/")
+    p = _inbox_allowed_path(rel)
+    if not p or not p.is_file():
+        raise HTTPException(status_code=404, detail="nota no encontrada")
+    p.write_text(str(content), encoding="utf-8")
+    return {"ok": True}
+
+
+@app.get("/admin/server")
+def admin_server_page() -> HTMLResponse:
+    panel_path = BASE_DIR / "admin_server_panel.html"
+    if panel_path.exists():
+        return HTMLResponse(panel_path.read_text(encoding="utf-8", errors="ignore"))
+    return HTMLResponse("<h3>Panel servidor no disponible (falta admin_server_panel.html).</h3>", status_code=404)
+
+
+@app.get("/admin/server/api/snapshot")
+def admin_server_api_snapshot(
+    request: Request,
+    range_key: str = Query("24h", alias="range", description="24h, 72h o 7d"),
+) -> dict:
+    _require_admin(request)
+    append_sample_if_due()
+    rk = (range_key or "24h").lower().strip()
+    if rk not in ("24h", "72h", "7d"):
+        rk = "24h"
+    return get_dashboard_payload(rk)
 
 
 @app.get("/admin/whatsapp/api/config")
@@ -1198,14 +3045,16 @@ async def webhook(request: Request):
 
     if from_me:
         message = data.get("message", {})
+        # Citamos el mensaje entrante para que la respuesta quede en el mismo hilo (móvil + PC).
+        reply_quote = _build_evolution_quote(key, message)
         text_check = (
             message.get("conversation")
             or message.get("extendedTextMessage", {}).get("text")
             or ""
         ).strip()
         cutoff = datetime.now() - timedelta(seconds=10)
-        _sent_texts[:] = [(t, ts) for t, ts in _sent_texts if ts > cutoff]
-        if any(t == text_check for t, _ in _sent_texts):
+        _sent_texts[:] = [(j, t, ts) for j, t, ts in _sent_texts if ts > cutoff]
+        if any((t == text_check and j == jid) for j, t, _ in _sent_texts):
             return {"ok": True}  # Es eco de respuesta de Jarvis, ignorar
         # Es el dueño escribiendo → usar número principal determinístico con JID correcto
         owner_phone = WHATSAPP_PRIMARY_OWNER_PHONE
@@ -1226,11 +3075,11 @@ async def webhook(request: Request):
                 # Prioridad: elegir primero las que suelen ser descargables/decodificables.
                 audio_url = None
                 chosen_key = None
-                for key in ("downloadUrl", "fileUrl", "mediaUrl", "url"):
-                    val = audio_obj.get(key)
+                for url_field in ("downloadUrl", "fileUrl", "mediaUrl", "url"):
+                    val = audio_obj.get(url_field)
                     if val:
                         audio_url = val
-                        chosen_key = key
+                        chosen_key = url_field
                         break
                 logger.info(
                     "[%s] Audio meta: file_name=%r chosen_key=%r audio_url_head=%r",
@@ -1262,13 +3111,14 @@ async def webhook(request: Request):
                     if user_key not in _voice_busy:
                         _voice_busy.add(user_key)
                         await asyncio.to_thread(
-                            _send,
-                            owner_jid,
-                            "🎧 Procesando audio... (un momento)",
+                            lambda: _send(
+                                owner_jid,
+                                "🎧 Procesando audio... (un momento)",
+                                reply_quote=reply_quote,
+                            ),
                         )
                         try:
                             def _download_and_transcribe() -> str | None:
-                                import transcribe_core
                                 tmp_dir = BASE_DIR / "audio"
                                 tmp_dir.mkdir(exist_ok=True, parents=True)
                                 ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1331,6 +3181,7 @@ async def webhook(request: Request):
                                 if total < 1024:
                                     logger.warning("[%s] Audio (fromMe) demasiado chico (%s bytes)", owner_phone, total)
                                     return None
+                                _inbox_copy_path_to_audio_subdir(tmp_path, owner_phone, file_name)
                                 effective_path = str(tmp_path)
                                 # Normalizar con ffmpeg a WAV para maximizar decodificación.
                                 wav_path = str(tmp_path.with_suffix(".wav"))
@@ -1338,23 +3189,12 @@ async def webhook(request: Request):
                                     ok = _ffmpeg_convert_to_wav(str(tmp_path), wav_path, owner_phone)
                                     if ok:
                                         effective_path = wav_path
-                                # 1) Si está configurado TRANSCRIBE_API_URL (N8N o API 8765), usarlo.
-                                api_txt = _transcribe_audio_via_api(effective_path, owner_phone)
-                                if api_txt and api_txt.strip() and api_txt.strip() != "(sin voz detectada)":
-                                    return api_txt
-
-                                # 2) Fallback local.
-                                try:
-                                    return transcribe_core.transcribe_voice(effective_path)
-                                except Exception as e:
-                                    logger.exception("[%s] Error transcribiendo audio (fromMe): %s", owner_phone, e)
-                                    # Si solo pudimos bajar el `.enc` (no base64 decodificable), evitamos que Gemini "invente".
-                                    if not used_base64:
-                                        return None
-                                    gem = _gemini_transcribe_audio(effective_path)
-                                    if gem:
-                                        return gem
-                                    return None
+                                # N8N / Whisper local / Gemini (ver `_transcribe_whatsapp_audio`).
+                                return _transcribe_whatsapp_audio(
+                                    effective_path,
+                                    owner_phone,
+                                    used_base64=used_base64,
+                                )
 
                             transcription = await asyncio.wait_for(
                                 asyncio.to_thread(_download_and_transcribe),
@@ -1362,7 +3202,14 @@ async def webhook(request: Request):
                             )
                             if transcription and _looks_like_valid_transcription(transcription):
                                 logger.info("[%s] Audio transcripto. head=%r", owner_phone, transcription[:120])
-                                await asyncio.to_thread(_process_message, transcription, owner_phone, owner_jid)
+                                await asyncio.to_thread(
+                                    lambda: _process_message(
+                                        transcription,
+                                        owner_phone,
+                                        owner_jid,
+                                        reply_quote=reply_quote,
+                                    ),
+                                )
                             else:
                                 logger.warning(
                                     "[%s] Transcripción inválida o vacía. head=%r",
@@ -1370,15 +3217,37 @@ async def webhook(request: Request):
                                     (transcription or "")[:120],
                                 )
                                 await asyncio.to_thread(
-                                    _send,
-                                    owner_jid,
-                                    "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
+                                    lambda: _send(
+                                        owner_jid,
+                                        "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
+                                        reply_quote=reply_quote,
+                                    ),
                                 )
                         finally:
                             _voice_busy.discard(user_key)
+                    return {"ok": True}
+            saved_fm = await asyncio.to_thread(
+                _persist_whatsapp_inbox_media, message, media_key_id, owner_phone
+            )
+            if saved_fm:
+                await asyncio.to_thread(
+                    lambda: _send(
+                        owner_jid,
+                        "💾 Archivo guardado en la bandeja del servidor.\n"
+                        f"📁 `{saved_fm}`\n"
+                        "Ver o borrar: /admin/inbox (Bearer = ADMIN_PANEL_TOKEN).",
+                        reply_quote=reply_quote,
+                    ),
+                )
             return {"ok": True}
 
-        await asyncio.to_thread(_process_message, text_check, owner_phone, owner_jid)
+        # Foto/video/archivo con leyenda: archivar en wa_inbox sin mensaje extra.
+        await asyncio.to_thread(
+            _persist_whatsapp_inbox_media, message, media_key_id, owner_phone
+        )
+        await asyncio.to_thread(
+            lambda: _process_message(text_check, owner_phone, owner_jid, reply_quote=reply_quote),
+        )
         return {"ok": True}
 
     # Mensajes de otras personas: verificar número autorizado.
@@ -1415,6 +3284,7 @@ async def webhook(request: Request):
         return {"ok": True}
 
     message = data.get("message", {})
+    reply_quote = _build_evolution_quote(key, message)
     text = (
         message.get("conversation")
         or message.get("extendedTextMessage", {}).get("text")
@@ -1437,11 +3307,11 @@ async def webhook(request: Request):
             file_name = audio_obj.get("fileName") or audio_obj.get("filename") or "voice.ogg"
             audio_url = None
             chosen_key = None
-            for key in ("downloadUrl", "fileUrl", "mediaUrl", "url"):
-                val = audio_obj.get(key)
+            for url_field in ("downloadUrl", "fileUrl", "mediaUrl", "url"):
+                val = audio_obj.get(url_field)
                 if val:
                     audio_url = val
-                    chosen_key = key
+                    chosen_key = url_field
                     break
             logger.info(
                 "[%s] Audio meta: file_name=%r chosen_key=%r audio_url_head=%r",
@@ -1478,16 +3348,16 @@ async def webhook(request: Request):
                 return {"ok": True}
             _voice_busy.add(user_key)
             await asyncio.to_thread(
-                _send,
-                jid,
-                "🎧 Procesando audio... (un momento)",
+                lambda: _send(
+                    jid,
+                    "🎧 Procesando audio... (un momento)",
+                    reply_quote=reply_quote,
+                ),
             )
 
             try:
                 # Descargar y transcribir en thread (no bloquear).
                 def _download_and_transcribe() -> str | None:
-                    import transcribe_core
-
                     tmp_dir = BASE_DIR / "audio"
                     tmp_dir.mkdir(exist_ok=True, parents=True)
                     # Evitar colisiones con múltiples mensajes.
@@ -1546,6 +3416,7 @@ async def webhook(request: Request):
                         logger.warning("[%s] Audio demasiado chico (%s bytes)", phone, total)
                         return None
 
+                    _inbox_copy_path_to_audio_subdir(tmp_path, phone, file_name)
                     effective_path = str(tmp_path)
                     wav_path = str(tmp_path.with_suffix(".wav"))
                     if wav_path != effective_path:
@@ -1553,23 +3424,11 @@ async def webhook(request: Request):
                         if ok:
                             effective_path = wav_path
 
-                    # 1) Si está configurado TRANSCRIBE_API_URL (N8N o API 8765), usarlo.
-                    api_txt = _transcribe_audio_via_api(effective_path, phone)
-                    if api_txt and api_txt.strip() and api_txt.strip() != "(sin voz detectada)":
-                        return api_txt
-
-                    # 2) Fallback local.
-                    try:
-                        return transcribe_core.transcribe_voice(effective_path)
-                    except Exception as e:
-                        logger.exception("[%s] Error transcribiendo audio: %s", phone, e)
-                        # Si solo pudimos bajar el `.enc` (no base64), evitamos Gemini "inventando".
-                        if not used_base64:
-                            return None
-                        gem = _gemini_transcribe_audio(effective_path)
-                        if gem:
-                            return gem
-                        return None
+                    return _transcribe_whatsapp_audio(
+                        effective_path,
+                        phone,
+                        used_base64=used_base64,
+                    )
 
                 transcription = await asyncio.wait_for(
                     asyncio.to_thread(_download_and_transcribe),
@@ -1577,7 +3436,14 @@ async def webhook(request: Request):
                 )
                 if transcription and _looks_like_valid_transcription(transcription):
                     logger.info("[%s] Audio transcripto. head=%r", phone, transcription[:120])
-                    await asyncio.to_thread(_process_message, transcription, phone, jid)
+                    await asyncio.to_thread(
+                        lambda: _process_message(
+                            transcription,
+                            phone,
+                            jid,
+                            reply_quote=reply_quote,
+                        ),
+                    )
                 else:
                     logger.warning(
                         "[%s] Transcripción inválida o vacía. head=%r",
@@ -1585,14 +3451,58 @@ async def webhook(request: Request):
                         (transcription or "")[:120],
                     )
                     await asyncio.to_thread(
-                        _send,
-                        jid,
-                        "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
+                        lambda: _send(
+                            jid,
+                            "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
+                            reply_quote=reply_quote,
+                        ),
                     )
             finally:
                 _voice_busy.discard(user_key)
+            return {"ok": True}
+
+        saved_in = await asyncio.to_thread(
+            _persist_whatsapp_inbox_media, message, media_key_id, phone
+        )
+        if saved_in:
+            await asyncio.to_thread(
+                lambda: _send(
+                    jid,
+                    "💾 Archivo guardado en la bandeja del servidor.\n"
+                    f"📁 `{saved_in}`\n"
+                    "Ver o borrar: /admin/inbox (Bearer = ADMIN_PANEL_TOKEN).",
+                    reply_quote=reply_quote,
+                ),
+            )
         return {"ok": True}
 
     # Procesar en thread para no bloquear el event loop de FastAPI
-    await asyncio.to_thread(_process_message, text, phone, jid)
+    await asyncio.to_thread(_persist_whatsapp_inbox_media, message, media_key_id, phone)
+    await asyncio.to_thread(
+        lambda: _process_message(text, phone, jid, reply_quote=reply_quote),
+    )
     return {"ok": True}
+
+
+@app.on_event("startup")
+async def _startup_log_routes() -> None:
+    """En journalctl / log: confirma que este proceso incluye logout/QR (si no, el deploy es viejo)."""
+    paths = [getattr(r, "path", "") for r in app.routes]
+    has_wa = any("walogout" in str(p) for p in paths)
+    has_evo_qr = any("evolution-qr" in str(p) for p in paths)
+    logger.info(
+        "whatsapp_bridge iniciado: rutas_totales=%s walogout=%s evolution-qr=%s",
+        len(paths),
+        has_wa,
+        has_evo_qr,
+    )
+    log_event(
+        "bridge_startup",
+        {
+            "rutas_totales": len(paths),
+            "walogout_route": has_wa,
+            "evolution_qr_admin_route": has_evo_qr,
+            "debug_log_file": str(LOG_FILE),
+            "debug_log_enabled": debug_log_enabled(),
+        },
+    )

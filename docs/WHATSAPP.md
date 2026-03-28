@@ -66,7 +66,11 @@ EVOLUTION_API_KEY=jarvis-secret
 EVOLUTION_INSTANCE=jarvis
 WHATSAPP_ALLOWED_NUMBERS=549XXXXXXXXXX   # tu número, sin + ni espacios
 WHATSAPP_SESSION_HOURS=8
+AGENT_SECRET=tu_clave   # obligatoria: misma que usás para iniciar sesión por WhatsApp; el panel /admin/whatsapp la pide para logout/QR
+# ADMIN_PANEL_TOKEN=...  # opcional; si no va, por defecto = AGENT_SECRET
 ```
+
+Hay una plantilla en `.env.example` del repo.
 
 ---
 
@@ -77,6 +81,29 @@ WHATSAPP_SESSION_HOURS=8
 ```
 
 Verificar estado: `curl http://localhost:8766/status`
+
+### 4.1 Systemd (recomendado en VPS)
+
+Para que siempre corra el **código actual** (rutas `/walogout`, panel, etc.) y se reinicie solo:
+
+```bash
+cd /ruta/al/telegram-bot
+cp -n .env.example .env   # si aún no tenés .env; editá AGENT_SECRET y Evolution
+python3 -m venv venv
+./venv/bin/pip install -r requirements-bridge.txt
+chmod +x scripts/install_jarvis_whatsapp_bridge_service.sh scripts/deploy_bridge.sh scripts/verify_bridge_health.sh
+sudo ./scripts/deploy_bridge.sh
+```
+
+Equivalente manual: solo `sudo ./scripts/install_jarvis_whatsapp_bridge_service.sh`.
+
+El unit está en `systemd/jarvis-whatsapp-bridge.service` (ajustá rutas si no usás `/root/telegram-bot`).
+
+Tras el arranque, en el log debe aparecer `whatsapp_bridge iniciado: ... walogout=True evolution-qr=True`. Si `walogout=False`, el proceso **no** es el binario nuevo.
+
+### 4.2 Nginx delante del puerto 8766
+
+Si **nginx** solo reenvía parte de las URLs, `/walogout` puede devolver 404. Hay que **proxy_pass** de todo el sitio al bridge, no solo `/admin/whatsapp`. Ver ejemplo en `deploy/nginx-jarvis-bridge.example.conf`.
 
 ---
 
@@ -119,3 +146,5 @@ El workflow revisa disco, RAM y load cada 15 minutos. Si alguno supera el 85%, t
 | Bridge no recibe webhooks | `WEBHOOK_GLOBAL_URL` apunta mal | Verificar que `172.17.0.1:8766` sea accesible desde el contenedor |
 | Jarvis no responde | Número no en `WHATSAPP_ALLOWED_NUMBERS` | Agregar número al `.env` y reiniciar bridge |
 | "Evolution API no configurada" | `EVOLUTION_API_URL` vacío en `.env` | Completar variable y reiniciar bridge |
+| Logout / QR del panel → 404 | Código viejo o nginx no enruta al bridge | `install_jarvis_whatsapp_bridge_service.sh` + nginx `proxy_pass` completo; **Plan B:** `GET /status?evolution_logout=1&token=AGENT_SECRET` (también botón en el panel) |
+| Cerrar sesión sin panel | Evolution directo | `curl -X DELETE "http://localhost:8080/instance/logout/INSTANCIA" -H "apikey: KEY"` |

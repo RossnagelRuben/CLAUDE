@@ -1,0 +1,456 @@
+{
+  "id": "3",
+  "name": "Jarvis - Producto (General) (Agente Chat)",
+  "description": "NOTAS: Agente Chat Hub (Gemini) para fichas de producto con OpenFoodFacts, Wikipedia, Wikidata, DDG + audit_log. Ver nota amarilla en el lienzo. En producción los bots usan jarvis_bot/whatsapp_bridge; esto es para pruebas en n8n Chat.",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "### Jarvis — Producto (General) (Agente Chat)\n\n**Qué es:** Agente de **inteligencia de producto** en el Chat Hub: identifica y describe productos usando datos reales (no inventa specs sin fuente).\n\n**Entradas típicas:** foto del producto, código EAN/UPC, o texto (marca + modelo).\n\n**Cómo funciona (flujo):**\n1. **Chat Trigger** recibe mensaje e imagen opcional.\n2. **AI Agent** (Gemini) usa tools HTTP: OpenFoodFacts (si hay barcode), Wikipedia/Wikidata, búsqueda DuckDuckGo.\n3. **Simple Memory** mantiene contexto corto entre turnos.\n4. Al final debe registrar auditoría vía tool **audit_log** (según system prompt).\n5. Salida: ficha en español con identificación, datos útiles, fuentes y nivel de confianza.\n\n**Dónde vive la lógica “de calle”:** comandos DRR y Jarvis en el servidor están en `jarvis_bot.py` / `whatsapp_bridge.py` y APIs DRR. Este workflow es el **espejo en n8n** para probar el agente de producto en el chat de la plataforma.\n\n**Requisitos:** credencial **Google Gemini** en el nodo del modelo; tools apuntan a APIs públicas (User-Agent en Wikipedia, etc.).",
+        "height": 540,
+        "width": 440,
+        "color": 4
+      },
+      "id": "b8f3c2b1-4e5d-4f6a-9b0c-1d2e3f4a5b6d",
+      "name": "NOTAS — Producto",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [40, 40]
+    },
+    {
+      "parameters": {
+        "public": true,
+        "mode": "hostedChat",
+        "authentication": "none",
+        "availableInChat": true,
+        "agentName": "Jarvis - Producto (General)",
+        "agentDescription": "Enviá una foto, un código de barras o una descripción y devuelvo la mejor ficha posible con fuentes.",
+        "options": {
+          "allowFileUploads": true,
+          "allowedFilesMimeTypes": "image/*,audio/*",
+          "inputPlaceholder": "Foto / código de barras / descripción…",
+          "responseMode": "streaming",
+          "loadPreviousSession": "memory"
+        }
+      },
+      "id": "chat-trigger",
+      "name": "Chat Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        260,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "contextWindowLength": 10
+      },
+      "id": "simple-memory",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        260,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "gemini-2.5-flash"
+      },
+      "id": "gemini-chat-model",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        500,
+        120
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "JJk3gqpR0AM7pBGP",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "auto",
+        "hasOutputParser": false,
+        "needsFallback": false,
+        "options": {
+          "systemMessage": "Eres Jarvis, un agente de inteligencia de producto.\n\nENTRADAS: el usuario puede enviar una imagen (foto del producto), un código de barras (EAN/UPC) y/o una descripción.\n\nOBJETIVO: identificar el producto con la mayor precisión posible y devolver una ficha con datos reales.\n\nHERRAMIENTAS DISPONIBLES:\n- openfoodfacts_lookup(barcode)\n- wikipedia_search(query)\n- wikipedia_summary(title)\n- wikidata_search(query)\n- ddg_search(query)\n- audit_log(agent, event, payload)\n\nPROCESO:\n1) Si el mensaje contiene un código de barras, primero intenta openfoodfacts_lookup.\n2) Si hay imagen, usa visión para extraer marca/modelo/texto visible y, si ves un EAN/UPC en la imagen, úsalo.\n3) Si OpenFoodFacts no aplica o no encuentra, usa ddg_search + wikidata_search/wikipedia_search para encontrar nombre oficial y fuentes.\n4) Para electrónicos/celulares: prioriza especificaciones solo si están en fuentes confiables; si no hay fuentes claras, dilo.\n\nAUDITORÍA (OBLIGATORIO): antes de responder al usuario, llama SIEMPRE a la tool audit_log PASÁNDOLE parámetros (no texto libre):\n- agent: \"jarvis-producto-general\"\n- event: \"run_ok\" o \"run_error\"\n- payload: un objeto JSON con al menos: user_text, inputs{barcode,has_image}, sources[], confidence, notes, errors[]\n\nSALIDA (en español, sin relleno):\n- Identificación (marca, nombre, modelo/variante, EAN/UPC si se confirma)\n- 5-15 datos relevantes según categoría (alimento vs electrónica)\n- 1-3 imágenes (links) si las fuentes las proveen\n- Fuentes (links)\n- Confianza: alta/media/baja + motivo\n\nREGLAS:\n- No inventes datos. Si falta información, decláralo.\n- Si hay conflicto entre fuentes, muéstralo y baja la confianza.\n",
+          "maxIterations": 8,
+          "returnIntermediateSteps": false,
+          "passthroughBinaryImages": true,
+          "enableStreaming": true,
+          "batching": {}
+        }
+      },
+      "id": "ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        500,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "openfoodfacts_lookup: Busca un producto por EAN/UPC (barcode) en OpenFoodFacts y devuelve JSON con datos, ingredientes, nutrición e imágenes si existen.",
+        "method": "GET",
+        "url": "https://world.openfoodfacts.org/api/v2/product/{{barcode}}.json",
+        "authentication": "none",
+        "sendQuery": true,
+        "specifyQuery": "keypair",
+        "parametersQuery": {
+          "values": [
+            {
+              "name": "fields",
+              "value": "code,product_name,brands,quantity,categories_tags,countries_tags,image_url,selected_images,nutrition_grades,ingredients_text,allergens,allergens_tags,nutriments,ecoscore_grade,packaging,labels_tags"
+            }
+          ]
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "truncateResponse": true,
+        "maxLength": 4000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "barcode",
+              "description": "EAN/UPC del producto, solo dígitos",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "tool-openfoodfacts",
+      "name": "openfoodfacts_lookup",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "wikipedia_search: Busca en Wikipedia y devuelve candidatos (títulos). Útil para obtener nombre oficial y entidad.",
+        "method": "GET",
+        "url": "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&utf8=1&srlimit=5&srsearch={{query}}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "JarvisProductBot/1.0 (https://example.invalid; mailto:admin@example.invalid)"
+            }
+          ]
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "truncateResponse": true,
+        "maxLength": 4000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "query",
+              "description": "Texto de búsqueda (marca + modelo + variante si se puede)",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "tool-wikipedia-search",
+      "name": "wikipedia_search",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "wikipedia_summary: Devuelve resumen y miniatura (si existe) de una página de Wikipedia por título (en).",
+        "method": "GET",
+        "url": "https://en.wikipedia.org/api/rest_v1/page/summary/{{title}}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "JarvisProductBot/1.0 (https://example.invalid; mailto:admin@example.invalid)"
+            }
+          ]
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "truncateResponse": true,
+        "maxLength": 4000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "title",
+              "description": "Título exacto de Wikipedia (usar el del search)",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "tool-wikipedia-summary",
+      "name": "wikipedia_summary",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "wikidata_search: Busca entidades en Wikidata (label/description) para confirmar modelo/variante y mejorar precisión.",
+        "method": "GET",
+        "url": "https://www.wikidata.org/w/api.php?action=wbsearchentities&format=json&language=es&limit=5&search={{query}}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "JarvisProductBot/1.0 (https://example.invalid; mailto:admin@example.invalid)"
+            }
+          ]
+        },
+        "optimizeResponse": true,
+        "responseType": "json",
+        "truncateResponse": true,
+        "maxLength": 4000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "query",
+              "description": "Texto de búsqueda (marca + modelo)",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "tool-wikidata-search",
+      "name": "wikidata_search",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "ddg_search: Búsqueda web general (DuckDuckGo HTML). Devuelve texto HTML resumido para encontrar fuentes oficiales y nombres correctos.",
+        "method": "GET",
+        "url": "https://duckduckgo.com/html/?q={{query}}",
+        "authentication": "none",
+        "responseType": "html",
+        "dataField": "body",
+        "onlyContent": true,
+        "truncateResponse": true,
+        "maxLength": 4000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "query",
+              "description": "Consulta de búsqueda",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "tool-ddg-search",
+      "name": "ddg_search",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "toolDescription": "audit_log: Registra un evento JSON de auditoría (mejora continua). Usalo al final de cada respuesta con un body JSON que incluya: agent, event, payload (input_normalizado, candidates, sources, confidence, tool_calls, errors).",
+        "method": "POST",
+        "url": "http://172.17.0.1:8770/audit",
+        "authentication": "none",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "agent",
+              "value": "={{$json.agent}}"
+            },
+            {
+              "name": "event",
+              "value": "={{$json.event}}"
+            },
+            {
+              "name": "payload",
+              "value": "={{JSON.stringify($json.payload)}}"
+            }
+          ]
+        },
+        "responseType": "json",
+        "truncateResponse": true,
+        "maxLength": 1000,
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "agent",
+              "description": "Nombre del agente/workflow",
+              "type": "string"
+            },
+            {
+              "name": "event",
+              "description": "Tipo de evento (run_ok o run_error)",
+              "type": "string"
+            },
+            {
+              "name": "payload",
+              "description": "Objeto JSON con detalles (user_text, sources, confidence, errors, etc.)",
+              "type": "json"
+            }
+          ]
+        }
+      },
+      "id": "tool-audit-log",
+      "name": "audit_log",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        820,
+        720
+      ]
+    }
+  ],
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "Chat Trigger",
+            "type": "ai_memory",
+            "index": 0
+          },
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "openfoodfacts_lookup": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wikipedia_search": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wikipedia_summary": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "wikidata_search": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ddg_search": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "audit_log": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
+

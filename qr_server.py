@@ -1,83 +1,101 @@
-"""Servidor web simple para mostrar el QR de WhatsApp."""
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import urllib.request
+"""
+Servidor web opcional para ver el QR de Evolution API (mismo HTML que ``/evolution/`` en el bridge).
+
+La lógica vive en ``evolution_qr.py``. Si ya usás ``whatsapp_bridge`` en el puerto 8766,
+podés abrir **http://TU_IP:8766/evolution/** y no hace falta levantar este proceso.
+
+Variable opcional: QR_SERVER_PORT (default 8099), bind 0.0.0.0
+
+Uso:
+    ./venv/bin/python qr_server.py
+"""
+from __future__ import annotations
+
 import json
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
 
-EVOLUTION_URL = "http://localhost:8080"
-EVOLUTION_KEY = "jarvis-secret"
-INSTANCE = "jarvis"
-PORT = 8888
+from dotenv import load_dotenv
 
-HTML = """<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Jarvis — Vincular WhatsApp</title>
-<style>
-  body {{ background: #111; color: #fff; font-family: sans-serif;
-          display: flex; flex-direction: column; align-items: center;
-          justify-content: center; min-height: 100vh; margin: 0; }}
-  h1 {{ color: #25d366; margin-bottom: 8px; }}
-  p {{ color: #aaa; margin-bottom: 24px; text-align: center; }}
-  img {{ border-radius: 12px; width: 280px; height: 280px; background: #fff; padding: 12px; }}
-  .error {{ color: #ff6b6b; font-size: 14px; }}
-  .reload {{ margin-top: 20px; background: #25d366; color: #fff; border: none;
-             padding: 12px 28px; border-radius: 8px; font-size: 16px;
-             cursor: pointer; text-decoration: none; }}
-  .reload:hover {{ background: #1ebe5d; }}
-  .steps {{ text-align: left; background: #222; padding: 20px 28px;
-            border-radius: 10px; margin-top: 24px; max-width: 320px; }}
-  .steps li {{ margin-bottom: 8px; color: #ccc; }}
-</style>
-</head>
-<body>
-<h1>📱 Jarvis — WhatsApp</h1>
-<p>Escaneá el QR con WhatsApp para vincular Jarvis</p>
-{content}
-<ol class="steps">
-  <li>Abrí WhatsApp en tu celular</li>
-  <li>Menú (⋮) → <b>Dispositivos vinculados</b></li>
-  <li>Tocá <b>Vincular un dispositivo</b></li>
-  <li>Apuntá la cámara al QR de arriba</li>
-</ol>
-<a href="/" class="reload">🔄 Actualizar QR</a>
-</body>
-</html>"""
+from evolution_qr import build_api_qr_response, handle_logout_post_body, html_qr_page
 
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
-def get_qr():
-    req = urllib.request.Request(
-        f"{EVOLUTION_URL}/instance/connect/{INSTANCE}",
-        headers={"apikey": EVOLUTION_KEY},
-    )
-    with urllib.request.urlopen(req, timeout=5) as r:
-        data = json.loads(r.read())
-    return data.get("base64", ""), data.get("pairingCode")
+PORT = int(os.getenv("QR_SERVER_PORT", "8099"))
+# Misma API relativa que antes: GET /api/qr, POST /api/logout
+_QR_API_PREFIX = "/api"
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
+    def log_message(self, fmt: str, *args) -> None:
+        return
 
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+    def _send_json(self, obj: dict, code: int = 200) -> None:
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        try:
-            b64, code = get_qr()
-            if b64:
-                content = f'<img src="{b64}" alt="QR WhatsApp">'
-                if code:
-                    content += f'<p style="color:#25d366;font-size:22px;letter-spacing:4px"><b>{code}</b></p>'
-            else:
-                content = '<p class="error">✅ Ya vinculado o QR no disponible.<br>Si recién escaneaste, ¡listo!</p>'
-        except Exception as e:
-            content = f'<p class="error">Error obteniendo QR: {e}</p>'
-        self.wfile.write(HTML.format(content=content).encode())
+        self.wfile.write(body)
+
+    def _send_html(self, html: str, code: int = 200) -> None:
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/api/qr":
+            self._send_json(build_api_qr_response())
+            return
+        if path in ("/", ""):
+            self._send_html(html_qr_page(api_prefix=_QR_API_PREFIX))
+            return
+        if path == "/qr_live.html":
+            live = BASE_DIR / "qr_live.html"
+            if live.is_file():
+                self._send_html(live.read_text(encoding="utf-8", errors="replace"))
+                return
+            self.send_error(404)
+            return
+        if path == "/jarvis_qr.png":
+            png = BASE_DIR / "jarvis_qr.png"
+            if png.is_file():
+                data = png.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self.send_error(404)
+            return
+        self.send_error(404)
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path != "/api/logout":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        code, payload = handle_logout_post_body(raw, dict(self.headers.items()))
+        self._send_json(payload, code)
+
+
+def main() -> None:
+    httpd = HTTPServer(("0.0.0.0", PORT), Handler)
+    print(f"QR web (opcional): http://0.0.0.0:{PORT}/  — mismo contenido que el bridge en /evolution/")
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"QR server corriendo en http://104.225.140.9:{PORT}")
-    server.serve_forever()
+    main()
