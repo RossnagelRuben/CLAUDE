@@ -224,7 +224,19 @@
           var pre = document.getElementById("evoAutoFeedLog");
           if (!pre) return;
           var lines = [];
-          lines.push("── Log auto — " + new Date().toLocaleString() + " ──");
+          lines.push(
+            "── Log auto — " +
+              new Date().toLocaleString("es-AR", {
+                hour12: false,
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              }) +
+              " ──"
+          );
           lines.push("[Navegador] últimas " + clientLogLines.length + " entradas (sin token ni secretos en URL):");
           var start = Math.max(0, clientLogLines.length - 45);
           for (var li = start; li < clientLogLines.length; li++) {

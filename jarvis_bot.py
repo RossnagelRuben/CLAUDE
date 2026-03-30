@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import urllib.request
 from datetime import datetime, timedelta
+from typing import Optional
 from io import BytesIO
 from pathlib import Path
 
@@ -35,6 +36,10 @@ from telegram.error import TelegramError
 # Log dedicado DRR (listar, callbacks, errores) para revisar fallos sin mezclar con log general
 from drr.chat_intents import parse_edit_image_intent, parse_producto_imagen_index
 from drr.logger import drr_log
+from jarvis_datetime_context import format_datetime_context_for_system_prompt
+from jarvis_prompt import compose_agent_system_prompt
+from jarvis_text_display import strip_markdown_display_symbols
+import google_workspace
 
 # =========================
 # CONFIG — Variables de entorno desde .env (no subir .env a repos)
@@ -243,7 +248,7 @@ def ask_gemini(user_text: str, context_memory: str | None = None) -> str:
     except ImportError as e:
         return f"(Gemini no disponible, falta dependencia google-genai: {e})"
 
-    system_prompt = PROMPT_FILE.read_text(encoding="utf-8")
+    system_prompt = compose_agent_system_prompt(BASE_DIR) + format_datetime_context_for_system_prompt()
     if context_memory:
         system_prompt += "\n\n--- CONTEXTO RECIENTE (logs de días anteriores) ---\n" + context_memory
 
@@ -312,14 +317,18 @@ async def get_ai_response(user_text: str, context_memory: str | None = None) -> 
 
             # Construir mensaje con contexto para compatibilidad con despliegues previos.
             user_message = user_text
+            tz_ctx = format_datetime_context_for_system_prompt().strip()
             if context_memory:
                 user_message = (
-                    "[El usuario tiene acceso a logs diarios. Usá NOTA: para apuntes y proponé comandos con ACCION:/CMD: cuando haga falta.]\n\n"
+                    tz_ctx
+                    + "\n\n[El usuario tiene acceso a logs diarios. Usá NOTA: para apuntes y proponé comandos con ACCION:/CMD: cuando haga falta.]\n\n"
                     "--- CONTEXTO RECIENTE ---\n"
                     + context_memory
                     + "\n\n--- MENSAJE ---\n"
                     + user_text
                 )
+            else:
+                user_message = tz_ctx + "\n\n--- MENSAJE ---\n" + user_text
             # Conexión: URL explícita o auto-detect (gateway local 127.0.0.1:18789)
             kwargs = {}
             if OPENCLAW_GATEWAY_WS_URL:
@@ -926,6 +935,24 @@ async def cmd_imagen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _do_generate_image(update, context, prompt)
 
 
+async def cmd_cripto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Jarvis Cripto: precios CMC, top, historial, balance simulado, cotización Jupiter (sin custodia de claves)."""
+    if not is_authorized(update):
+        await update.message.reply_text("⛔ chat no autorizado")
+        return
+    if not session_ok():
+        await update.message.reply_text("🔒 primero /login TU_CLAVE")
+        return
+    from crypto.commands import try_handle_crypto_command
+
+    args = context.args or []
+    line = "/cripto " + " ".join(args) if args else "/cripto"
+    uid = str(update.effective_chat.id)
+    out = try_handle_crypto_command(line, uid, _get_crypto_service())
+    if out:
+        await _reply_crypto_message(update, out, uid)
+
+
 # =========================
 # BÚSQUEDA EN INTERNET (DuckDuckGo, sin API key)
 # =========================
@@ -1026,6 +1053,34 @@ def _get_servicio_productos():
     buscador = DuckDuckGoBuscadorImagenes()
     almacen = AlmacenImagenesLocal(PRODUCTOS_IMAGENES_DIR)
     return ServicioProductos(repo, buscador, almacen)
+
+
+_crypto_service = None
+
+
+def _get_crypto_service():
+    global _crypto_service
+    if _crypto_service is None:
+        from crypto import build_crypto_service
+
+        _crypto_service = build_crypto_service(BASE_DIR)
+    return _crypto_service
+
+
+async def _reply_crypto_message(update: Update, reply_text: str, user_id: str) -> None:
+    """Envía respuesta cripto; si hay swap recién armado, adjunta el base64 completo."""
+    svc = _get_crypto_service()
+    chunk = 4096
+    plain = strip_markdown_display_symbols(reply_text)
+    for i in range(0, len(plain), chunk):
+        await update.message.reply_text(plain[i : i + chunk])
+    prep = svc.peek_last_prepared(user_id)
+    if prep and "🧾 Swap preparado" in reply_text:
+        await update.message.reply_document(
+            document=BytesIO(prep.swap_transaction_base64.encode("ascii")),
+            filename="jupiter_swap_tx.b64.txt",
+            caption="TX base64 completa para firmar en Phantom / Solflare.",
+        )
 
 
 def _build_drr_zero_log(servicio, descripcion: str | None, codigo_barras: str | None) -> str:
@@ -1672,6 +1727,30 @@ async def _do_generate_audio(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 pass
 
 
+def _telegram_drive_resolve_path(rel: str) -> Optional[Path]:
+    """Ruta local bajo notes/ o wa_inbox/ para DRIVE_SUBIR (Telegram)."""
+    rel = (rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    p = (BASE_DIR / rel).resolve()
+    try:
+        p.relative_to(BASE_DIR.resolve())
+    except ValueError:
+        return None
+    notes = (BASE_DIR / "notes").resolve()
+    inbox = (BASE_DIR / "wa_inbox").resolve()
+    try:
+        p.relative_to(notes)
+        return p if p.is_file() else None
+    except ValueError:
+        pass
+    try:
+        p.relative_to(inbox)
+        return p if p.is_file() else None
+    except ValueError:
+        return None
+
+
 # =========================
 # TEXT AND VOICE HANDLERS (lógica compartida para texto y voz transcrita)
 # =========================
@@ -1690,6 +1769,49 @@ async def _process_user_message(
 
     if not text.strip():
         return
+
+    # =========================
+    # Jarvis Cripto (/cripto o mensaje «cripto …»)
+    # =========================
+    from crypto.commands import try_handle_crypto_command
+
+    uid_msg = str(update.effective_chat.id)
+    crypto_out = try_handle_crypto_command(text, uid_msg, _get_crypto_service())
+    if crypto_out is not None:
+        await _reply_crypto_message(update, crypto_out, uid_msg)
+        append_log("user", text.strip())
+        append_log("assistant", crypto_out[:1500])
+        return
+
+    # =========================
+    # Confirmación Google Calendar (misma convención SI/NO que WhatsApp)
+    # =========================
+    pending_cal = (context.user_data or {}).get("pending_calendar_event")
+    if pending_cal:
+        tcal = text.strip().upper()
+        if tcal in ("SI", "SÍ", "S", "YES", "Y"):
+            context.user_data.pop("pending_calendar_event", None)
+            try:
+                pl = google_workspace.normalize_calendar_payload(pending_cal)
+                ev = google_workspace.create_calendar_event(
+                    pl["title"],
+                    pl["start"],
+                    end_iso=pl.get("end"),
+                    description=pl.get("description"),
+                )
+                link = (ev.get("htmlLink") or "").strip()
+                msg = "✅ Evento creado en Google Calendar." + (f"\n{link}" if link else "")
+                await update.message.reply_text(msg)
+                append_log("assistant", msg, entry_type="message")
+            except Exception as e:
+                logger.exception("Telegram calendar create")
+                await update.message.reply_text(f"❌ No se pudo crear el evento: {e}")
+            return
+        if tcal in ("NO", "N", "CANCELAR"):
+            context.user_data.pop("pending_calendar_event", None)
+            await update.message.reply_text("Ok, no lo agendé en el calendario.")
+            return
+        context.user_data.pop("pending_calendar_event", None)
 
     # =========================
     # OPCIÓN "cambiar a gemini" / "volver a modo normal" por texto
@@ -1827,11 +1949,91 @@ async def _process_user_message(
     try:
         response = await get_ai_response(user_for_ai, context_memory=context_memory)
 
+        cal_j = google_workspace.extract_json_after_marker(response, "CALENDAR_PROPUESTA:")
+        reply_rest = (
+            google_workspace.strip_marker_and_json(response, "CALENDAR_PROPUESTA:")
+            if cal_j
+            else response
+        )
+        if cal_j:
+            try:
+                payload = google_workspace.normalize_calendar_payload(cal_j)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Calendario (datos inválidos): {e}")
+                if reply_rest.strip():
+                    await update.message.reply_text(strip_markdown_display_symbols(reply_rest)[:4000])
+                return
+            if not google_workspace.oauth_configured():
+                await update.message.reply_text(
+                    "📅 Falta configurar Google OAuth en el servidor. Ver docs/GOOGLE_CALENDAR_DRIVE.md"
+                )
+                if reply_rest.strip():
+                    await update.message.reply_text(strip_markdown_display_symbols(reply_rest)[:4000])
+                return
+            if not google_workspace.is_authorized():
+                prefix = (os.getenv("JARVIS_PUBLIC_BASE_URL") or "").strip().rstrip("/") or "http://TU_VPS"
+                await update.message.reply_text(
+                    "📅 Conectá Google una vez en el navegador:\n"
+                    f"{prefix}/admin/google/oauth/start?token=(ADMIN_PANEL_TOKEN)"
+                )
+                if reply_rest.strip():
+                    await update.message.reply_text(strip_markdown_display_symbols(reply_rest)[:4000])
+                return
+            context.user_data["pending_calendar_event"] = payload
+            await update.message.reply_text(
+                "📅 ¿Lo agendo en tu Google Calendar?\n\n"
+                + google_workspace.format_event_for_user(payload)
+                + "\n\nRespondé SI para confirmar o NO para cancelar."
+            )
+            rr = reply_rest.strip()
+            if rr.startswith("NOTA:"):
+                note_text = rr.replace("NOTA:", "", 1).strip()
+                path = save_note(note_text)
+                append_log("assistant", f"Nota guardada: {note_text}", entry_type="nota")
+                await update.message.reply_text(
+                    f"📝 Nota guardada en:\n{path}\n\n{strip_markdown_display_symbols(note_text)}"
+                )
+            elif rr:
+                await update.message.reply_text(strip_markdown_display_symbols(rr)[:4000])
+            return
+
+        dm = re.search(r"(?mi)^DRIVE_SUBIR:\s*(\S+)\s*$", response)
+        if dm:
+            rel = dm.group(1).strip()
+            rest = re.sub(r"(?mi)^DRIVE_SUBIR:\s*\S+\s*", "", response, count=1).strip()
+            path = _telegram_drive_resolve_path(rel)
+            if not path or not path.is_file():
+                await update.message.reply_text(f"❌ No encuentro el archivo: `{rel}`")
+                if rest:
+                    await update.message.reply_text(strip_markdown_display_symbols(rest)[:4000])
+                return
+            if not google_workspace.oauth_configured() or not google_workspace.is_authorized():
+                prefix = (os.getenv("JARVIS_PUBLIC_BASE_URL") or "").strip().rstrip("/") or "http://TU_VPS"
+                await update.message.reply_text(
+                    f"📁 Conectá Google primero: {prefix}/admin/google/oauth/start?token=(ADMIN_PANEL_TOKEN)"
+                )
+                if rest:
+                    await update.message.reply_text(strip_markdown_display_symbols(rest)[:4000])
+                return
+            try:
+                up = google_workspace.upload_file_to_drive(path, drive_name=path.name)
+                link = (up.get("webViewLink") or "").strip()
+                msg = f"✅ Subido a Drive: {up.get('name')}" + (f"\n{link}" if link else "")
+                await update.message.reply_text(msg)
+            except Exception as e:
+                logger.exception("Telegram Drive upload")
+                await update.message.reply_text(f"❌ Error subiendo a Drive: {e}")
+            if rest:
+                await update.message.reply_text(strip_markdown_display_symbols(rest)[:4000])
+        return
+
         if response.startswith("NOTA:"):
             note_text = response.replace("NOTA:", "", 1).strip()
             path = save_note(note_text)
             append_log("assistant", f"Nota guardada: {note_text}", entry_type="nota")
-            await update.message.reply_text(f"📝 Nota guardada en:\n{path}\n\n{note_text}")
+            await update.message.reply_text(
+                f"📝 Nota guardada en:\n{path}\n\n{strip_markdown_display_symbols(note_text)}"
+            )
             return
 
         # DRR PRODUCTOS: el modelo debe devolver una línea con "PRODUCTOS: descripcion | cantidad".
@@ -1903,7 +2105,7 @@ async def _process_user_message(
                 out_txt += (
                     "\n\n_Para ver la imagen de un ítem: «imagen del producto 1» o «foto del primero»._"
                 )
-            await update.message.reply_text(out_txt[:4000])
+            await update.message.reply_text(strip_markdown_display_symbols(out_txt)[:4000])
             return
 
         if "PRODUCTO_IMAGEN:" in response.upper():
@@ -1973,18 +2175,20 @@ async def _process_user_message(
                         await update.message.reply_text("No encontré ninguna imagen para esa búsqueda. Probá con otra frase o enviame una foto.")
                 return
             # Si no había query válida, seguir como respuesta normal
-        if "IMAGEN:" in response:
-            m = re.search(r"IMAGEN:\s*(.+)", response, re.DOTALL)
-            if m:
-                prompt_imagen = m.group(1).strip()
-                # Evitar usar como prompt texto de ayuda (listas de comandos, AUDIO:, BUSCAR:, etc.)
-                if any(x in prompt_imagen for x in ("AUDIO:", "BUSCAR:", "CMD:", "NOTA:", "Logs", "Proyectos", "descripción detallada")):
-                    append_log("assistant", response)
-                    await update.message.reply_text(response[:4000])
-                    return
-                append_log("assistant", f"Generando imagen: {prompt_imagen[:100]}...", entry_type="imagen")
-                await _do_generate_image(update, context, prompt_imagen)
+        m_img = re.search(r"(?s)IMAGEN\s*:\s*(.+)", response)
+        if m_img:
+            prompt_imagen = m_img.group(1).strip()
+            # Evitar usar como prompt texto de ayuda (listas de comandos, AUDIO:, BUSCAR:, etc.)
+            if any(
+                x in prompt_imagen
+                for x in ("AUDIO:", "BUSCAR:", "CMD:", "NOTA:", "Logs", "Proyectos")
+            ):
+                append_log("assistant", response)
+                await update.message.reply_text(strip_markdown_display_symbols(response)[:4000])
                 return
+            append_log("assistant", f"Generando imagen: {prompt_imagen[:100]}...", entry_type="imagen")
+            await _do_generate_image(update, context, prompt_imagen)
+            return
 
         if "AUDIO:" in response:
             m = re.search(r"AUDIO:\s*(.+)", response, re.DOTALL)
@@ -2011,7 +2215,7 @@ async def _process_user_message(
                     )
                     respuesta_final = await get_ai_response(prompt_con_resultados, context_memory=None)
                     append_log("assistant", respuesta_final[:200] + ("..." if len(respuesta_final) > 200 else ""))
-                    await update.message.reply_text(respuesta_final[:4000])
+                    await update.message.reply_text(strip_markdown_display_symbols(respuesta_final)[:4000])
                 except Exception as e:
                     logger.exception("Error en búsqueda: %s", e)
                     await update.message.reply_text(f"❌ Error al buscar: {e}")
@@ -2035,7 +2239,7 @@ async def _process_user_message(
             # Si aún no hay comando, no mostrar error: tratar la respuesta como texto normal
             if not cmd:
                 append_log("assistant", response)
-                await update.message.reply_text(response[:4000])
+                await update.message.reply_text(strip_markdown_display_symbols(response)[:4000])
                 return
             code = str(random.randint(1000, 9999))
             pending_command = cmd
@@ -2051,7 +2255,7 @@ async def _process_user_message(
             return
 
         append_log("assistant", response)
-        await update.message.reply_text(response[:4000])
+        await update.message.reply_text(strip_markdown_display_symbols(response)[:4000])
 
     except Exception as e:
         append_log("sistema", f"Error: {e}", entry_type="error")
@@ -2452,6 +2656,7 @@ def main():
             BotCommand("buscar", "Buscar en internet"),
             BotCommand("cambiargemini", "Cambiar a Gemini para voz / volver a modo normal"),
             BotCommand("productos", "DRR: consultar productos, imágenes"),
+            BotCommand("cripto", "Cripto: precios, top, simulado, swap Jupiter"),
         ])
         logger.info("Menú de comandos (/) actualizado en Telegram.")
 
@@ -2473,6 +2678,7 @@ def main():
     app.add_handler(CommandHandler("buscar", cmd_buscar))
     app.add_handler(CommandHandler("cambiargemini", cmd_cambiargemini))
     app.add_handler(CommandHandler("productos", cmd_productos))
+    app.add_handler(CommandHandler("cripto", cmd_cripto))
     app.add_handler(CallbackQueryHandler(callback_drr_log_copy, pattern="^drr_log_copy$"))
     app.add_handler(CallbackQueryHandler(callback_drr_img_nav, pattern="^drr_img_(prev|next)$"))
     app.add_handler(CallbackQueryHandler(callback_drr_buscar, pattern="^drr_buscar_\\d+$"))

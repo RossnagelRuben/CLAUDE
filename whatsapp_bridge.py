@@ -20,14 +20,20 @@ import asyncio
 import base64
 import html
 import json
-import time
 import logging
 import os
 import re
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+import threading
+import time
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field
+from urllib.parse import unquote
 
 import httpx
 from dotenv import load_dotenv
@@ -43,6 +49,10 @@ from evolution_qr import (
     html_qr_page,
 )
 from server_metrics import append_sample_if_due, get_dashboard_payload
+from jarvis_datetime_context import format_datetime_context_for_system_prompt
+from jarvis_prompt import compose_agent_system_prompt
+from jarvis_text_display import strip_markdown_display_symbols
+import google_workspace
 
 from whatsapp_debug_log import (
     LOG_FILE,
@@ -83,6 +93,9 @@ CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 AGENT_SECRET = os.getenv("AGENT_SECRET", "").strip()
 ADMIN_PANEL_TOKEN = os.getenv("ADMIN_PANEL_TOKEN", "").strip() or AGENT_SECRET
+# Nombres de unidades systemd (reinicio desde el panel de inicio).
+JARVIS_SYSTEMD_WHATSAPP = os.getenv("JARVIS_SYSTEMD_WHATSAPP", "jarvis-whatsapp-bridge").strip()
+JARVIS_SYSTEMD_TELEGRAM = os.getenv("JARVIS_SYSTEMD_TELEGRAM", "jarvis-telegram-bot").strip()
 TRANSCRIBE_API_URL = os.getenv("TRANSCRIBE_API_URL", "").strip()
 # Misma clave que Telegram para DALL·E (fallback si Gemini Imagen falla).
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -205,6 +218,68 @@ DRR_API_KEY = os.getenv("DRR_API_KEY", "").strip()
 
 SESSION_HOURS = int(os.getenv("WHATSAPP_SESSION_HOURS", "8"))
 
+# Menú con botones (Evolution POST /message/sendButtons/{instance})
+# https://doc.evolution-api.com/v2/api-reference/message-controller/send-button
+WHATSAPP_SEND_MENU_BUTTONS = os.getenv("WHATSAPP_SEND_MENU_BUTTONS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "sí",
+)
+# Por defecto: intentar *solo botones* primero (hasta 3 por mensaje; varios mensajes si hay más ítems).
+WHATSAPP_MENU_BUTTONS_FIRST = os.getenv("WHATSAPP_MENU_BUTTONS_FIRST", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "sí",
+)
+# Si los botones fallan (p. ej. Baileys sin sendButtons), enviar lista desplegable como respaldo.
+WHATSAPP_MENU_LIST_FALLBACK = os.getenv("WHATSAPP_MENU_LIST_FALLBACK", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "sí",
+)
+# Partir el menú en varios mensajes de 3 botones (WhatsApp limita a 3 reply buttons por mensaje).
+WHATSAPP_MENU_SPLIT_BUTTONS = os.getenv("WHATSAPP_MENU_SPLIT_BUTTONS", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+    "sí",
+)
+try:
+    WHATSAPP_MENU_MAX_BUTTON_MSGS = max(1, int(os.getenv("WHATSAPP_MENU_MAX_BUTTON_MSGS", "5").strip() or "5"))
+except ValueError:
+    WHATSAPP_MENU_MAX_BUTTON_MSGS = 5
+
+WHATSAPP_MENU_BUTTON_TITLE = (os.getenv("WHATSAPP_MENU_BUTTON_TITLE", "Menú") or "Menú").strip()
+WHATSAPP_MENU_BUTTON_DESCRIPTION = (
+    os.getenv(
+        "WHATSAPP_MENU_BUTTON_DESCRIPTION",
+        "Atajos abajo; también podés escribir en lenguaje natural. "
+        "Búsqueda web, imágenes, audio, productos DRR, calendario, notas, servidor y cripto.",
+    )
+    or "Elegí una opción tocando un botón."
+).strip()
+WHATSAPP_MENU_BUTTON_FOOTER = (os.getenv("WHATSAPP_MENU_BUTTON_FOOTER", "Jarvis") or "Jarvis").strip()
+# id|Etiqueta (coma entre ítems). Lista sendList: hasta 10 filas; botones: 3 por mensaje (se parte en varios mensajes).
+# Los ids en _MENU_ID_CRYPTO_COMMAND van a /cripto; los de _MENU_ID_ACTIONS generan texto para la IA.
+WHATSAPP_MENU_BUTTONS_SPEC = os.getenv(
+    "WHATSAPP_MENU_BUTTONS_SPEC",
+    "buscar_web|Buscar web,gen_imagen|Imagen IA,edit_imagen|Editar foto,audio_tts|Audio voz,"
+    "productos_drr|Productos,calendario|Calendario,notas|Notas,cripto_ayuda|Ayuda cripto,precio_sol|Precio SOL",
+).strip()
+# Textos al mostrar botones por «qué podés hacer» / ayuda (si vacío, se usan título menú + texto por defecto)
+WHATSAPP_HELP_BUTTON_TITLE = os.getenv("WHATSAPP_HELP_BUTTON_TITLE", "").strip()
+WHATSAPP_HELP_BUTTON_DESCRIPTION = os.getenv("WHATSAPP_HELP_BUTTON_DESCRIPTION", "").strip()
+# Texto del botón que abre la lista (sendList); si sendButtons falla en tu Evolution, se usa sendList.
+WHATSAPP_LIST_OPEN_BUTTON_TEXT = os.getenv("WHATSAPP_LIST_OPEN_BUTTON_TEXT", "Ver opciones").strip() or "Ver opciones"
+WHATSAPP_LIST_SECTION_TITLE = os.getenv("WHATSAPP_LIST_SECTION_TITLE", "Opciones").strip() or "Opciones"
+
 # Backend de texto: preferimos Gemini si está configurado y dejamos Claude como fallback.
 _has_gemini_text = bool(GEMINI_API_KEY)
 if not CLAUDE_API_KEY and not _has_gemini_text:
@@ -215,6 +290,11 @@ if not AGENT_SECRET:
 claude = anthropic.Anthropic(api_key=CLAUDE_API_KEY) if (CLAUDE_API_KEY and anthropic) else None
 BACKEND_NAME = "Gemini" if _has_gemini_text else "Claude"
 app = FastAPI(title="Jarvis WhatsApp Bridge", version="1.0")
+
+# Chat web (misma IA que Telegram) — rutas en jarvis_web_chat.py
+from jarvis_web_chat import build_router as _jarvis_web_chat_router_factory
+
+app.include_router(_jarvis_web_chat_router_factory())
 
 
 @app.middleware("http")
@@ -240,6 +320,295 @@ async def jarvis_whatsapp_http_debug(request: Request, call_next):
     except Exception:
         pass
     return response
+
+
+_WD_ES = (
+    "lunes",
+    "martes",
+    "miércoles",
+    "jueves",
+    "viernes",
+    "sábado",
+    "domingo",
+)
+_MES_ES = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
+
+
+def _human_datetime_es(dt: datetime) -> str:
+    return (
+        f"{_WD_ES[dt.weekday()]}, {dt.day} de {_MES_ES[dt.month - 1]} de {dt.year} · "
+        f"{dt.strftime('%H:%M:%S')}"
+    )
+
+
+def _home_time_payload() -> dict:
+    local = datetime.now().astimezone()
+    utc = datetime.now(timezone.utc)
+    return {
+        "ok": True,
+        "local_iso": local.isoformat(),
+        "utc_iso": utc.isoformat(),
+        "local_display": _human_datetime_es(local),
+        "utc_display": utc.strftime("%Y-%m-%d %H:%M:%S"),
+        "tz_label": local.tzname() or "",
+    }
+
+
+def _build_home_html() -> str:
+    initial_json = json.dumps(_home_time_payload(), ensure_ascii=False)
+    # Créditos (enlace público Notion — curriculum / contacto).
+    powered_href = (
+        "https://disco-cartwheel-18e.notion.site/"
+        "Curriculum-Vitae-786c7d09af32431c885c7cccb5a4c1b9?source=copy_link"
+    )
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Jarvis — Inicio</title>
+  <style>
+    :root {{ --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9cb3; --accent: #3d9eff;
+      --ok: #3ecf8e; --warn: #e8b44f; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0; min-height: 100vh; font-family: system-ui, "Segoe UI", sans-serif;
+      background: radial-gradient(ellipse 120% 80% at 50% -20%, #1e3a5f 0%, var(--bg) 55%);
+      color: var(--text); display: flex; align-items: center; justify-content: center;
+      padding: 1.5rem;
+    }}
+    .wrap {{ max-width: 32rem; width: 100%; text-align: center; }}
+    h1 {{ font-size: 1.75rem; font-weight: 600; margin: 0 0 0.75rem; letter-spacing: -0.02em; }}
+    .clock {{
+      background: var(--card); border: 1px solid rgba(61, 158, 255, 0.2); border-radius: 12px;
+      padding: 1.1rem 1rem; margin-bottom: 1.25rem; text-align: center;
+    }}
+    .clock .local {{ font-size: 1.35rem; font-weight: 600; color: var(--text); line-height: 1.35; }}
+    .clock .sub {{ font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; }}
+    .clock .utc {{ font-family: ui-monospace, monospace; font-size: 0.8rem; color: var(--muted); margin-top: 0.35rem; }}
+    p.intro {{ color: var(--muted); margin: 0 0 1.25rem; line-height: 1.55; font-size: 0.95rem; }}
+    nav {{ display: flex; flex-direction: column; gap: 0.5rem; }}
+    a {{
+      display: block; padding: 0.65rem 1rem; background: var(--card); color: var(--accent);
+      text-decoration: none; border-radius: 8px; border: 1px solid rgba(61, 158, 255, 0.25);
+      font-size: 0.95rem; transition: background 0.15s, border-color 0.15s;
+    }}
+    a:hover {{ background: #243044; border-color: rgba(61, 158, 255, 0.45); }}
+    .panel-restart {{
+      margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid rgba(139, 156, 179, 0.2);
+      text-align: left;
+    }}
+    .panel-restart h2 {{ font-size: 1rem; margin: 0 0 0.5rem; color: var(--text); }}
+    input[type="password"] {{
+      width: 100%; padding: 0.55rem 0.65rem; border-radius: 8px; border: 1px solid rgba(139, 156, 179, 0.35);
+      background: #0d1218; color: var(--text); font-size: 0.9rem; margin-bottom: 0.65rem;
+    }}
+    .btn-row {{ display: flex; flex-wrap: wrap; gap: 0.45rem; }}
+    button.btn {{
+      flex: 1; min-width: 8rem; padding: 0.55rem 0.65rem; border-radius: 8px; border: none; cursor: pointer;
+      font-size: 0.85rem; font-weight: 500; background: #2a3f5c; color: var(--text);
+      border: 1px solid rgba(61, 158, 255, 0.35);
+    }}
+    button.btn:hover {{ background: #334d6e; }}
+    button.btn-warn {{ border-color: rgba(232, 180, 79, 0.5); color: var(--warn); }}
+    #restartMsg {{ font-size: 0.8rem; margin-top: 0.65rem; min-height: 1.2em; color: var(--ok); }}
+    #restartMsg.err {{ color: #f07178; }}
+    /* Pie minimalista (estilo del antiguo badge), solo texto con enlace en negrita */
+    .site-footer {{
+      margin-top: 1.5rem; font-size: 0.75rem; color: var(--muted); text-align: center; line-height: 1.5;
+    }}
+    .site-footer .footer-link {{
+      color: inherit; text-decoration: none; border: none; background: none; padding: 0; display: inline;
+    }}
+    .site-footer .footer-link strong {{ font-weight: 600; }}
+    .site-footer .footer-link:hover {{ color: var(--accent); text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Jarvis</h1>
+    <div class="clock" id="clockBox">
+      <div class="local" id="lineLocal">—</div>
+      <div class="sub" id="lineTz"></div>
+      <div class="utc" id="lineUtc"></div>
+    </div>
+    <p class="intro">Servidor Jarvis · hora del sistema (24 h). WhatsApp, Telegram, chat web y panel de recursos.</p>
+    <nav>
+      <a href="/admin/whatsapp">WhatsApp — administración</a>
+      <a href="/admin/inbox">Bandeja — notas y archivos</a>
+      <a href="/jarvis-chat" target="_blank" rel="noopener noreferrer">Jarvis Bot — chat web (misma IA que Telegram)</a>
+      <a href="/admin/server">Estado del servidor — CPU, RAM y disco</a>
+    </nav>
+    <div class="panel-restart">
+      <h2>Reiniciar servicios</h2>
+      <input type="password" id="adminToken" placeholder="Token admin" autocomplete="current-password"/>
+      <div class="btn-row">
+        <button type="button" class="btn" id="btnWa">WhatsApp (bridge)</button>
+        <button type="button" class="btn" id="btnTg">Telegram (bot)</button>
+        <button type="button" class="btn btn-warn" id="btnBoth">Ambos</button>
+      </div>
+      <div id="restartMsg"></div>
+    </div>
+    <p class="site-footer">
+      <a class="footer-link" href="{html.escape(powered_href)}" target="_blank" rel="noopener noreferrer"><strong>Power By: Rubencito Sistemas</strong></a>
+    </p>
+  </div>
+  <script id="home-time-initial" type="application/json">{initial_json}</script>
+  <script>
+(function () {{
+  var elL = document.getElementById("lineLocal");
+  var elTz = document.getElementById("lineTz");
+  var elU = document.getElementById("lineUtc");
+  var elMsg = document.getElementById("restartMsg");
+  function applyPayload(d) {{
+    if (!d || !d.local_display) return;
+    elL.textContent = d.local_display;
+    elTz.textContent = d.tz_label ? ("Zona: " + d.tz_label) : "";
+    elU.textContent = "UTC: " + (d.utc_display || "");
+  }}
+  try {{
+    var raw = document.getElementById("home-time-initial").textContent;
+    applyPayload(JSON.parse(raw));
+  }} catch (e) {{}}
+  function tick() {{
+    fetch("/api/home/time", {{ credentials: "same-origin" }})
+      .then(function (r) {{ return r.json(); }})
+      .then(applyPayload)
+      .catch(function () {{}});
+  }}
+  setInterval(tick, 5000);
+  function restart(target) {{
+    elMsg.textContent = "";
+    elMsg.className = "";
+    var tok = (document.getElementById("adminToken").value || "").trim();
+    if (!tok) {{
+      elMsg.className = "err";
+      elMsg.textContent = "Ingresá el token admin.";
+      return;
+    }}
+    elMsg.textContent = "Enviando…";
+    fetch("/api/home/restart", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{ token: tok, target: target }}),
+    }})
+      .then(function (r) {{ return r.json().then(function (j) {{ return {{ ok: r.ok, j: j }}; }}); }})
+      .then(function (x) {{
+        if (!x.ok) {{
+          elMsg.className = "err";
+          elMsg.textContent = (x.j && x.j.detail) ? String(x.j.detail) : "Error";
+          return;
+        }}
+        elMsg.textContent = (x.j && x.j.detail) ? x.j.detail : "Listo.";
+      }})
+      .catch(function () {{
+        elMsg.className = "err";
+        elMsg.textContent = "Sin respuesta (¿reinicio del bridge?)";
+      }});
+  }}
+  document.getElementById("btnWa").addEventListener("click", function () {{ restart("whatsapp"); }});
+  document.getElementById("btnTg").addEventListener("click", function () {{ restart("telegram"); }});
+  document.getElementById("btnBoth").addEventListener("click", function () {{ restart("both"); }});
+}})();
+  </script>
+</body>
+</html>"""
+
+
+def _systemctl_restart(unit: str) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/systemctl", "restart", unit],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        err = (proc.stderr or proc.stdout or "").strip()
+        if proc.returncode != 0:
+            return False, err or f"systemctl falló (código {proc.returncode})"
+        return True, "ok"
+    except FileNotFoundError:
+        return False, "systemctl no encontrado"
+    except subprocess.TimeoutExpired:
+        return False, "timeout al reiniciar"
+    except Exception as e:
+        return False, str(e)[:400]
+
+
+class JarvisRestartBody(BaseModel):
+    token: str = Field(min_length=1)
+    target: Literal["whatsapp", "telegram", "both"]
+
+
+@app.get("/", response_class=HTMLResponse)
+def home_page() -> HTMLResponse:
+    """Página de bienvenida: hora del servidor y accesos (HTTPS vía nginx)."""
+    return HTMLResponse(content=_build_home_html())
+
+
+@app.get("/api/home/time")
+def api_home_time() -> dict:
+    """Hora del servidor (pública) para el reloj de la página de inicio."""
+    return _home_time_payload()
+
+
+@app.post("/api/home/restart")
+def api_home_restart(body: JarvisRestartBody) -> JSONResponse:
+    """
+    Reinicia unidades systemd del bridge WhatsApp y/o del bot Telegram.
+    Requiere el mismo token que el panel admin. El reinicio del bridge
+    programa un restart diferido para poder devolver JSON al cliente.
+    """
+    if body.token != ADMIN_PANEL_TOKEN:
+        return JSONResponse(
+            status_code=403,
+            content={"ok": False, "detail": "Token incorrecto"},
+        )
+    parts: list[str] = []
+
+    if body.target in ("telegram", "both"):
+        ok_t, msg_t = _systemctl_restart(JARVIS_SYSTEMD_TELEGRAM)
+        if not ok_t:
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "detail": f"Telegram ({JARVIS_SYSTEMD_TELEGRAM}): {msg_t}"},
+            )
+        parts.append("Telegram: reiniciado.")
+
+    if body.target in ("whatsapp", "both"):
+
+        def _delayed_whatsapp_restart() -> None:
+            time.sleep(1.0)
+            ok_w, msg_w = _systemctl_restart(JARVIS_SYSTEMD_WHATSAPP)
+            logger.info(
+                "Reinicio diferido %s: ok=%s %s",
+                JARVIS_SYSTEMD_WHATSAPP,
+                ok_w,
+                msg_w,
+            )
+
+        threading.Thread(target=_delayed_whatsapp_restart, daemon=True).start()
+        parts.append("WhatsApp (bridge): reinicio en curso; puede cortarse la respuesta.")
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "detail": " ".join(parts) if parts else "Nada que reiniciar.",
+        }
+    )
 
 
 @app.get("/j/ping")
@@ -406,6 +775,10 @@ _sessions: dict[str, datetime] = {}
 _history: dict[str, list[dict]] = {}
 # Comandos pendientes de confirmación: phone → comando
 _pending_cmd: dict[str, str] = {}
+# Propuesta de evento Calendar: phone → dict normalizado (title, start, end?, description?)
+_pending_calendar: dict[str, dict] = {}
+# Último archivo guardado en wa_inbox (ruta relativa) por número, para DRIVE_SUBIR: ultimo
+_last_inbox_media_rel: dict[str, str] = {}
 MAX_TURNS = 6  # últimas 6 rondas (12 mensajes)
 # Textos recién enviados por Jarvis — para no procesar el eco del fromMe propio.
 # Guardamos también el jid para evitar falsos positivos entre chats distintos.
@@ -497,9 +870,7 @@ def _open_session(phone: str) -> None:
 
 
 def _system_prompt() -> str:
-    if PROMPT_FILE.exists():
-        return PROMPT_FILE.read_text(encoding="utf-8")
-    return (
+    fallback = (
         "Sos Jarvis, asistente de servidor. Respondé siempre en español, breve y claro. "
         "Podés proponer comandos con ACCION: o CMD: (el usuario confirmará). "
         "Guardá notas con NOTA: y realizá búsquedas con BUSCAR:. "
@@ -507,6 +878,11 @@ def _system_prompt() -> str:
         "(nunca uses CMD: ni cat/ls sobre rutas inventadas como ~/.jarvis_notes.txt). "
         "Respetá estrictamente el formato de acciones ya definido para Jarvis."
     )
+    if PROMPT_FILE.exists():
+        base = compose_agent_system_prompt(BASE_DIR)
+    else:
+        base = compose_agent_system_prompt(BASE_DIR, fallback_main=fallback)
+    return base + format_datetime_context_for_system_prompt()
 
 
 def _ask_claude(text: str, phone: str) -> str:
@@ -967,6 +1343,452 @@ def _build_evolution_quote(key: dict, message: dict) -> dict | None:
     }
 
 
+def _parse_buttons_spec(spec: str) -> list[tuple[str, str]]:
+    """Parsea WHATSAPP_MENU_BUTTONS_SPEC: ``id|Etiqueta,id2|Et2``."""
+    out: list[tuple[str, str]] = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if "|" not in part:
+            continue
+        bid, label = part.split("|", 1)
+        bid, label = bid.strip(), label.strip()
+        if bid and label:
+            out.append((bid, label))
+    return out
+
+
+def _menu_buttons_from_env() -> list[tuple[str, str]]:
+    return _parse_buttons_spec(WHATSAPP_MENU_BUTTONS_SPEC)
+
+
+# ids → comando /cripto (try_handle_crypto_command)
+_MENU_ID_CRYPTO_COMMAND: dict[str, str] = {
+    "cripto_ayuda": "/cripto ayuda",
+    "precio_sol": "/cripto precio SOL",
+    "precio_btc": "/cripto precio BTC",
+    "precio_eth": "/cripto precio ETH",
+    "top_mercado": "/cripto top 10",
+    "swap_info": "/cripto swap",
+    "balance_sim": "/cripto balance",
+}
+
+# ids → texto que recibe la IA (atajos de capacidades del agente)
+_MENU_ID_ACTIONS: dict[str, str] = {
+    "buscar_web": (
+        "Quiero buscar información en internet. Explicame cómo pedirlo (BUSCAR:) y preguntame qué tema buscar."
+    ),
+    "gen_imagen": (
+        "Quiero generar una imagen con IA. Explicame el formato IMAGEN: y pedime la descripción de la imagen."
+    ),
+    "edit_imagen": (
+        "Quiero editar una imagen (envié o la última generada). Explicame cómo pedir la edición paso a paso."
+    ),
+    "audio_tts": (
+        "Quiero que me respondas en audio o voz (TTS). Explicame cómo pedirlo (AUDIO:)."
+    ),
+    "productos_drr": (
+        "Quiero usar el catálogo de productos (API DRR). Explicame PRODUCTOS: y pedime qué buscar o cuántos listar."
+    ),
+    "calendario": (
+        "Quiero agendar en Google Calendar o un recordatorio. Explicame CALENDAR_PROPUESTA: y la confirmación con SI."
+    ),
+    "notas": (
+        "Quiero guardar o listar notas (NOTA: / LISTAR_NOTAS:). Explicame cómo."
+    ),
+    "drive_subir": (
+        "Quiero subir un archivo a Google Drive (DRIVE_SUBIR:). Explicame rutas y requisitos."
+    ),
+    "servidor_cmd": (
+        "Quiero ejecutar algo en el servidor Linux (ACCION:/CMD: y confirmación SI). Explicame el flujo."
+    ),
+}
+
+
+def _expand_whatsapp_menu_row_selection(text: str) -> str:
+    """
+    Si el usuario tocó una fila de la lista/botón del menú, el webhook suele mandar el ``rowId``
+    (p. ej. ``cripto_ayuda``). Si el id está mapeado a un comando /cripto, lo devolvemos tal cual;
+    si hay texto en _MENU_ID_ACTIONS, se lo damos a la IA; si no, mensaje genérico.
+    """
+    raw = (text or "").strip()
+    if not raw or len(raw) > 120:
+        return text
+    t = _spanish_fold(raw)
+    for bid, label in _menu_buttons_from_env():
+        if not bid:
+            continue
+        if _spanish_fold(bid) != t and _spanish_fold(label) != t:
+            continue
+        bid_l = bid.strip().lower()
+        crypto_cmd = _MENU_ID_CRYPTO_COMMAND.get(bid_l)
+        if crypto_cmd:
+            return crypto_cmd
+        action = _MENU_ID_ACTIONS.get(bid_l)
+        if action:
+            return action
+        return (
+            f'El usuario eligió la opción de menú «{label}» (id {bid}). '
+            "Ayudalo con esa opción según las reglas de Jarvis (agent_prompt)."
+        )
+    return text
+
+
+def _extract_plain_text_from_whatsapp_message(message: dict | None) -> str:
+    """
+    Texto entrante: conversación, extendido, o pulsación de botón interactivo.
+    Evolution/Baileys suele usar buttonsResponseMessage / templateButtonReplyMessage.
+    """
+    if not isinstance(message, dict):
+        return ""
+    conv = message.get("conversation")
+    if conv is not None:
+        t = str(conv).strip()
+        if t:
+            return t
+    ext = message.get("extendedTextMessage")
+    if isinstance(ext, dict):
+        t = (ext.get("text") or "").strip()
+        if t:
+            return t
+    for key in ("buttonsResponseMessage", "templateButtonReplyMessage"):
+        br = message.get(key)
+        if not isinstance(br, dict):
+            continue
+        tsel = (
+            br.get("selectedDisplayText")
+            or br.get("selectedButtonText")
+            or br.get("SelectedDisplayText")
+        )
+        if tsel and str(tsel).strip():
+            return str(tsel).strip()
+        tid = br.get("selectedButtonId") or br.get("selectedID") or br.get("selectedId")
+        if tid and str(tid).strip():
+            return str(tid).strip()
+    lr = message.get("listResponseMessage")
+    if isinstance(lr, dict):
+        ss = lr.get("singleSelectReply") or lr.get("singleSelectreply")
+        if isinstance(ss, dict):
+            rid = (ss.get("selectedRowId") or ss.get("selectedId") or "").strip()
+            if rid:
+                return rid
+        # Variantes de payload
+        for k in ("title", "description"):
+            v = lr.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def _evolution_jid_digits(target_jid: str) -> str:
+    return re.sub(r"\D", "", target_jid.split("@", 1)[0] if target_jid else "")
+
+
+def _send_list_menu_evolution(
+    jid: str,
+    *,
+    title: str,
+    description: str,
+    footer: str,
+    rows: list[tuple[str, str, str]],
+    reply_quote: dict | None = None,
+    button_text: str | None = None,
+) -> bool:
+    """
+    Lista interactiva (sendList). Fallback cuando sendButtons no está soportado.
+    https://doc.evolution-api.com/v2/api-reference/message-controller/send-list
+    """
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        return False
+    num_digits = _evolution_jid_digits(jid)
+    if not num_digits:
+        return False
+    bt = (button_text or WHATSAPP_LIST_OPEN_BUTTON_TEXT)[:24]
+    section_title = WHATSAPP_LIST_SECTION_TITLE[:24]
+    list_rows = []
+    for rid, rtitle, rdesc in rows[:10]:
+        rt = (rtitle or rid)[:24]
+        rd = (rdesc or rtitle or rid or ".")[:72]
+        if not str(rd).strip():
+            rd = "."
+        list_rows.append({"title": rt, "description": rd, "rowId": rid[:200]})
+    if not list_rows:
+        return False
+    url = f"{EVOLUTION_API_URL.rstrip('/')}/message/sendList/{EVOLUTION_INSTANCE}"
+    section_block = [{"title": section_title, "rows": list_rows}]
+    # Algunas builds (p. ej. con prefijo tipo Cloud) exigen `listMessage` anidado, como `textMessage`.
+    payloads: list[tuple[str, dict]] = [
+        (
+            "listMessage_wrapped",
+            {
+                "number": num_digits,
+                "listMessage": {
+                    "title": (title or "Menú")[:60],
+                    "description": (description or " ")[:4096],
+                    "footerText": (footer or " ")[:60],
+                    "buttonText": bt,
+                    "sections": section_block,
+                },
+            },
+        ),
+        (
+            "listMessage_flat",
+            {
+                "number": num_digits,
+                "title": (title or "Menú")[:60],
+                "description": (description or " ")[:4096],
+                "buttonText": bt,
+                "footerText": (footer or " ")[:60],
+                "sections": section_block,
+            },
+        ),
+    ]
+    for label, body in payloads:
+        if reply_quote:
+            body = {**body, "quoted": reply_quote}
+        try:
+            resp = httpx.post(url, json=body, headers={"apikey": EVOLUTION_API_KEY}, timeout=60.0)
+            if resp.status_code < 400:
+                logger.info("sendList OK (%s) jid=%r filas=%s", label, jid, [r[0] for r in rows])
+                return True
+            logger.warning(
+                "Evolution sendList %s HTTP %s: %s",
+                label,
+                resp.status_code,
+                (resp.text or "")[:800],
+            )
+        except Exception as e:
+            logger.warning("Evolution sendList %s excepción: %s", label, e)
+    return False
+
+
+def _try_send_buttons_chunk(
+    jid: str,
+    *,
+    title: str,
+    description: str,
+    footer: str,
+    trimmed: list[tuple[str, str]],
+    reply_quote: dict | None = None,
+) -> bool:
+    """
+    Envía un mensaje con **máximo 3** botones de respuesta (límite WhatsApp).
+    Prueba variantes de payload Evolution/Baileys.
+    """
+    if not trimmed:
+        return False
+    # WhatsApp limita el texto visible del botón (~20 caracteres en varias builds).
+    chunk = trimmed[:3]
+    base = EVOLUTION_API_URL.rstrip("/")
+    inst = EVOLUTION_INSTANCE
+    url_buttons = f"{base}/message/sendButtons/{inst}"
+
+    def _buttons_cloud_api() -> list[dict]:
+        return [{"buttonText": label[:20], "buttonId": bid[:256]} for bid, label in chunk]
+
+    def _buttons_baileys_dto(use_title_key: bool) -> list[dict]:
+        out: list[dict] = []
+        for bid, label in chunk:
+            if use_title_key:
+                out.append({"title": "reply", "displayText": label, "id": bid})
+            else:
+                out.append({"type": "reply", "displayText": label, "id": bid})
+        return out
+
+    def _post_send_buttons(target_jid: str, payload_variant: str) -> tuple[bool, bool]:
+        num_digits = _evolution_jid_digits(target_jid)
+        if not num_digits:
+            return False, False
+        # Evolution API v2 espera SendButtonsDto plano: number, title, description, footer, buttons[{type,displayText,id}].
+        # https://github.com/EvolutionAPI/evolution-api — sendButtons → buttonMessage(data) con type: "reply".
+        if payload_variant == "wrapped_cloud":
+            arr = _buttons_cloud_api()
+        elif payload_variant in ("wrapped_type", "flat_type"):
+            arr = _buttons_baileys_dto(use_title_key=False)
+        else:
+            arr = _buttons_baileys_dto(use_title_key=True)
+        if payload_variant.startswith("wrapped") or payload_variant == "wrapped_cloud":
+            body = {
+                "number": num_digits,
+                "buttonMessage": {
+                    "title": (title or " ")[:256],
+                    "description": (description[:4096] if description else " ") or " ",
+                    "footer": (footer[:256] if footer else " ") or " ",
+                    "buttons": arr,
+                },
+            }
+        else:
+            body = {
+                "number": num_digits,
+                "title": (title or " ")[:256],
+                "description": (description[:4096] if description else " ") or " ",
+                "footer": (footer[:256] if footer else " ") or " ",
+                "buttons": arr,
+            }
+        if reply_quote:
+            body["quoted"] = reply_quote
+        try:
+            resp = httpx.post(url_buttons, json=body, headers={"apikey": EVOLUTION_API_KEY}, timeout=60.0)
+            if resp.status_code < 400:
+                logger.info("sendButtons OK (%s) jid=%r", payload_variant, target_jid)
+                return True, False
+            txt = (resp.text or "")[:1200]
+            logger.warning(
+                "sendButtons %s HTTP %s: %s",
+                payload_variant,
+                resp.status_code,
+                txt[:800],
+            )
+            if "Method not available" in txt and "Baileys" in txt:
+                logger.info("sendButtons no disponible en esta instancia Baileys; probando lista u otro mensaje")
+                return False, True
+        except Exception as e:
+            logger.warning("sendButtons %s excepción: %s", payload_variant, e)
+        return False, False
+
+    # 1) flat_type = SendButtonsDto oficial Evolution (number + title + description + footer + buttons type:reply).
+    # 2) wrapped_* = compatibilidad con forks / clientes que esperan otro JSON.
+    variants = ("flat_type", "wrapped_type", "wrapped_title", "wrapped_cloud", "flat_title")
+    for variant in variants:
+        ok, skip = _post_send_buttons(jid, variant)
+        if ok:
+            return True
+        if skip:
+            break
+    if jid.endswith("@s.whatsapp.net"):
+        num = jid.replace("@s.whatsapp.net", "")
+        alt = WHATSAPP_PHONE_MAP.get(num)
+        if not alt:
+            for k, v in WHATSAPP_PHONE_MAP.items():
+                if v == num:
+                    alt = k
+                    break
+        if alt and alt != num:
+            alt_jid = f"{alt}@s.whatsapp.net"
+            for variant in variants:
+                ok, skip = _post_send_buttons(alt_jid, variant)
+                if ok:
+                    return True
+                if skip:
+                    break
+    return False
+
+
+def _send_buttons(
+    jid: str,
+    *,
+    title: str,
+    description: str,
+    footer: str,
+    buttons: list[tuple[str, str]],
+    reply_quote: dict | None = None,
+    single_message_only: bool = False,
+) -> bool:
+    """
+    Menú interactivo.
+
+    Por defecto (``WHATSAPP_MENU_BUTTONS_FIRST``): envía **solo botones** (hasta 3 por mensaje);
+    si hay más ítems, se envían **varios mensajes** en bloques de 3.
+
+    ``single_message_only=True``: solo **un** mensaje con los primeros 3 botones (estilo tarjeta / quick reply).
+
+    Si los botones fallan y ``WHATSAPP_MENU_LIST_FALLBACK=1``, se usa **lista** (sendList).
+
+    Modo legacy (``WHATSAPP_MENU_BUTTONS_FIRST=0``): lista primero, luego botones como antes.
+    """
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.warning("Evolution API no configurada; menú interactivo omitido")
+        return False
+    if not buttons:
+        logger.warning("Menú: sin botones definidos")
+        return False
+
+    max_list = 10
+    buttons_for_list = buttons[:max_list]
+    if len(buttons) > max_list:
+        logger.warning("Menú: la lista muestra solo %s ítems; se omiten %s", max_list, len(buttons) - max_list)
+    list_rows = [(bid, label, label) for bid, label in buttons_for_list]
+
+    def _list_for_jid(target: str) -> bool:
+        return _send_list_menu_evolution(
+            target,
+            title=title,
+            description=description,
+            footer=footer,
+            rows=list_rows,
+            reply_quote=reply_quote,
+        )
+
+    def _try_list_both_jids() -> bool:
+        if _list_for_jid(jid):
+            return True
+        if jid.endswith("@s.whatsapp.net"):
+            num = jid.replace("@s.whatsapp.net", "")
+            alt = WHATSAPP_PHONE_MAP.get(num)
+            if not alt:
+                for k, v in WHATSAPP_PHONE_MAP.items():
+                    if v == num:
+                        alt = k
+                        break
+            if alt and alt != num and _list_for_jid(f"{alt}@s.whatsapp.net"):
+                return True
+        return False
+
+    if single_message_only:
+        chunks = [buttons[:3]]
+    elif WHATSAPP_MENU_SPLIT_BUTTONS:
+        raw_chunks = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+        chunks = raw_chunks[: WHATSAPP_MENU_MAX_BUTTON_MSGS]
+        if len(raw_chunks) > WHATSAPP_MENU_MAX_BUTTON_MSGS:
+            logger.warning(
+                "Menú: se envían solo %s mensajes de botones (%s ítems); definí más entradas en WHATSAPP_MENU_BUTTONS_SPEC o subí el límite",
+                WHATSAPP_MENU_MAX_BUTTON_MSGS,
+                WHATSAPP_MENU_MAX_BUTTON_MSGS * 3,
+            )
+    else:
+        chunks = [buttons[:3]]
+
+    nchunks = len(chunks) or 1
+
+    if WHATSAPP_MENU_BUTTONS_FIRST:
+        any_ok = False
+        for i, chunk in enumerate(chunks):
+            sub_title = title if i == 0 else f"{(title or 'Menú')[:40]} · {i + 1}/{nchunks}"
+            sub_desc = description if i == 0 else "Más acciones."
+            sub_quote = reply_quote if i == 0 else None
+            if _try_send_buttons_chunk(
+                jid,
+                title=sub_title,
+                description=sub_desc,
+                footer=footer,
+                trimmed=chunk,
+                reply_quote=sub_quote,
+            ):
+                any_ok = True
+        if any_ok:
+            return True
+        if WHATSAPP_MENU_LIST_FALLBACK:
+            return _try_list_both_jids()
+        return False
+
+    # Legacy: lista primero
+    if _try_list_both_jids():
+        return True
+    for i, chunk in enumerate(chunks):
+        sub_title = title if i == 0 else f"{(title or 'Menú')[:40]} · {i + 1}/{nchunks}"
+        sub_desc = description if i == 0 else "Más acciones."
+        sub_quote = reply_quote if i == 0 else None
+        if _try_send_buttons_chunk(
+            jid,
+            title=sub_title,
+            description=sub_desc,
+            footer=footer,
+            trimmed=chunk,
+            reply_quote=sub_quote,
+        ):
+            return True
+    return False
+
+
 def _send(jid: str, text: str, *, reply_quote: dict | None = None) -> None:
     """Envía un mensaje de texto via Evolution API. `reply_quote` opcional para responder en el mismo hilo."""
     if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
@@ -1025,6 +1847,63 @@ def _send(jid: str, text: str, *, reply_quote: dict | None = None) -> None:
         logger.info("Fallback de envío exitoso: %s -> %s", jid, alt_jid)
     except Exception as e2:
         logger.error("Fallback también falló para %s: %s", jid, e2)
+
+
+_bridge_crypto_service = None
+
+
+def _get_bridge_crypto_service():
+    global _bridge_crypto_service
+    if _bridge_crypto_service is None:
+        from crypto import build_crypto_service
+
+        _bridge_crypto_service = build_crypto_service(BASE_DIR)
+    return _bridge_crypto_service
+
+
+def _send_wa_document(
+    jid: str,
+    doc_bytes: bytes,
+    file_name: str,
+    caption: str | None = None,
+    *,
+    reply_quote: dict | None = None,
+) -> bool:
+    """Envía un documento (p. ej. TX base64) por Evolution sendMedia."""
+    if not EVOLUTION_API_URL or not EVOLUTION_API_KEY:
+        logger.warning("Evolution API no configurada; documento no enviado")
+        return False
+    num_digits = re.sub(r"\D", "", jid.split("@", 1)[0] if jid else "")
+    if not num_digits:
+        return False
+    url = f"{EVOLUTION_API_URL.rstrip('/')}/message/sendMedia/{EVOLUTION_INSTANCE}"
+    b64 = base64.b64encode(doc_bytes).decode("ascii")
+    body: dict = {
+        "number": num_digits,
+        "mediaMessage": {
+            "mediatype": "document",
+            "mimetype": "text/plain",
+            "caption": (caption or "")[:1024],
+            "media": b64,
+            "fileName": file_name,
+        },
+    }
+    if reply_quote:
+        body["quoted"] = reply_quote
+    try:
+        resp = httpx.post(url, json=body, headers={"apikey": EVOLUTION_API_KEY}, timeout=120.0)
+        if resp.status_code >= 400:
+            logger.error(
+                "Evolution sendMedia document HTTP %s: %s",
+                resp.status_code,
+                (resp.text or "")[:800],
+            )
+        resp.raise_for_status()
+        _sent_texts.append((jid, (caption or file_name)[:80], datetime.now()))
+        return True
+    except Exception as e:
+        logger.exception("Error enviando documento WhatsApp a %s: %s", jid, e)
+        return False
 
 
 def _mime_for_image_bytes(image_bytes: bytes, file_name: str) -> str:
@@ -1741,6 +2620,21 @@ def _inbox_allowed_path(rel: str) -> Path | None:
         return None
 
 
+def _persist_inbox_and_track(message: dict, media_key_id: str, phone: str) -> str | None:
+    """Guarda medio en wa_inbox y registra la ruta relativa para DRIVE_SUBIR: ultimo."""
+    rel = _persist_whatsapp_inbox_media(message, media_key_id, phone)
+    if rel:
+        key = re.sub(r"\D", "", phone or "")
+        if key:
+            _last_inbox_media_rel[key] = rel
+    return rel
+
+
+def _jarvis_public_base() -> str:
+    """Base pública (sin / final) para enlaces OAuth; ej. http://104.225.140.9"""
+    return (os.getenv("JARVIS_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+
+
 def _inbox_kind_from_rel(rel: str) -> str:
     r = rel.replace("\\", "/")
     if r.startswith("notes/"):
@@ -1988,6 +2882,94 @@ def _user_wants_list_notes(text: str) -> bool:
     return any(p in t for p in phrases)
 
 
+def _spanish_fold(s: str) -> str:
+    """Minúsculas y sin tildes para matchear 'que'/'qué', 'puedes'/'podés', etc."""
+    s = (s or "").strip().lower()
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
+
+def _user_wants_exact_menu_command(text: str) -> bool:
+    """Solo la palabra menú o /start → conviene mostrar el menú completo (todas las opciones)."""
+    raw = (text or "").strip().lower()
+    return raw in ("menú", "menu", "/menu", "/menú", "/start", "start")
+
+
+def _user_wants_whatsapp_help_or_menu(text: str) -> bool:
+    """
+    Usuario pide menú, ayuda o «qué podés hacer» → mostrar botones si hay WHATSAPP_MENU_BUTTONS_SPEC.
+    Comparación sin tildes: muchos escriben 'que puedes hacer?' y antes solo matcheaba 'qué…'.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    t = _spanish_fold(raw)
+    if _user_wants_exact_menu_command(text):
+        return True
+    if t in ("menu", "/menu", "/start", "start"):
+        return True
+    # Todas las variantes sin acentos (comparación sobre `t` foldado)
+    needles = (
+        "que podes hacer",
+        "que puedes hacer",
+        "que puedo hacer",
+        "que podemos hacer",
+        "que podria hacer",
+        "que podrias hacer",
+        "que sabes hacer",
+        "que sabés hacer",
+        "para que servis",
+        "para que sirvis",
+        "que haces",
+        "que hacés",
+        "que funciones tenes",
+        "que funciones tenés",
+        "opciones disponibles",
+        "mostrame opciones",
+        "mostra opciones",
+        "mostrar opciones",
+        "capacidades",
+        "en que me ayudas",
+        "en que me ayudás",
+        "como me ayudas",
+        "como me ayudás",
+        "listado de comandos",
+        "comandos disponibles",
+        "que ofreces",
+    )
+    if any(n in t for n in needles):
+        return True
+    # «Qué puedo/puedes/podemos hacer» (una sola regex cubre tildes vía fold)
+    if re.search(r"\bque\s+(puedo|podemos|podes|puedes|podria|podrias)\s+hacer\b", t):
+        return True
+    # Preguntas típicas (foldadas)
+    if re.search(r"\bque\s+(podes|puedes|puedo|podemos|sabes|ofreces)\b", t):
+        return True
+    if re.search(r"\bque\s+hac(es|és)\b", t):
+        return True
+    if re.search(r"\bcomo\s+(ayudas|funcionas)\b", t):
+        return True
+    return False
+
+
+def _whatsapp_capabilities_fallback_text() -> str:
+    """Si no hay botones configurados, respuesta breve en texto."""
+    return (
+        "🤖 *Jarvis* — podés escribir en lenguaje natural o usar comandos.\n\n"
+        "• *Búsqueda web* (BUSCAR:)\n"
+        "• *Imágenes* (IMAGEN: / editar)\n"
+        "• *Audio* (AUDIO: cuando pedís voz)\n"
+        "• *Productos DRR* (PRODUCTOS:)\n"
+        "• *Google Calendar* y *Drive* (si está conectado)\n"
+        "• *Cripto:* `/cripto ayuda`, precios, top, swap…\n"
+        "• *Servidor Linux* (ACCION:/CMD: + confirmación *SI*)\n"
+        "• *Notas* (NOTA:)\n\n"
+        "Para el *menú con botones*, definí `WHATSAPP_MENU_BUTTONS_SPEC` en el servidor "
+        "(por defecto el bridge trae atajos de cripto, búsqueda, imágenes, etc.)."
+    )
+
+
 def _user_text_extract_save_note(text: str) -> str | None:
     """
     Si el usuario pide guardar una nota en lenguaje natural, devuelve el cuerpo; si no, None.
@@ -2031,7 +3013,7 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
     """
 
     def send(msg: str) -> None:
-        _send(jid, msg, reply_quote=reply_quote)
+        _send(jid, strip_markdown_display_symbols(msg), reply_quote=reply_quote)
 
     # Remapeamos el `jid` para enviar usando el número que Evolution acepta.
     # En algunos flujos (p.ej. al activar sesión) el webhook puede pasar un `jid`
@@ -2059,9 +3041,72 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
         if candidate == AGENT_SECRET:
             _open_session(phone)
             send(f"✅ Sesión iniciada. Hola, soy Jarvis. Sesión válida por {SESSION_HOURS}h.")
+            if WHATSAPP_SEND_MENU_BUTTONS:
+                bdef = _menu_buttons_from_env()
+                if bdef:
+                    okb = _send_buttons(
+                        jid,
+                        title=WHATSAPP_MENU_BUTTON_TITLE,
+                        description=WHATSAPP_MENU_BUTTON_DESCRIPTION,
+                        footer=WHATSAPP_MENU_BUTTON_FOOTER,
+                        buttons=bdef,
+                        reply_quote=None,
+                    )
+                    if not okb:
+                        send(
+                            "No se pudo enviar el menú interactivo tras el login. "
+                            "Revisá logs del bridge; el servidor intenta botones y luego lista."
+                        )
         else:
             send("🔒 Ingresá la clave de acceso para usar Jarvis. Podés enviarla a pelo o como `/login TU_CLAVE`.")
         return
+
+    # --- Menú con botones: «menú» o «qué podés hacer» / ayuda / capacidades ---
+    if _user_wants_whatsapp_help_or_menu(text):
+        # Mismas opciones que `WHATSAPP_MENU_BUTTONS_SPEC` (varios mensajes de a 3 botones si hay muchas).
+        # Texto distinto solo en el primer bloque si preguntan «qué podés hacer» vs «menú».
+        use_help_text = not _user_wants_exact_menu_command(text)
+        bdef = _menu_buttons_from_env()
+        title_h = (
+            (WHATSAPP_HELP_BUTTON_TITLE or "¿Qué podés hacer?").strip()
+            if use_help_text
+            else (WHATSAPP_MENU_BUTTON_TITLE or "Menú")
+        )
+        desc_h = (
+            (
+                (WHATSAPP_HELP_BUTTON_DESCRIPTION or "").strip()
+                or (
+                    "Soy Jarvis, tu asistente en este chat.\n\n"
+                    "Podés escribirme en lenguaje natural o usar los botones de los mensajes que siguen.\n"
+                    "Incluye: búsqueda web, imágenes y edición, audio, productos (DRR), "
+                    "Google Calendar, notas, cripto y comandos en el servidor.\n\n"
+                    "Elegí una opción 👇"
+                )
+            )
+            if use_help_text
+            else WHATSAPP_MENU_BUTTON_DESCRIPTION
+        )
+        if bdef and _send_buttons(
+            jid,
+            title=title_h,
+            description=desc_h,
+            footer=WHATSAPP_MENU_BUTTON_FOOTER,
+            buttons=bdef,
+            reply_quote=reply_quote,
+            single_message_only=False,
+        ):
+            return
+        if bdef:
+            send(
+                "No se pudo mostrar el menú interactivo (ni botones ni lista). "
+                "Revisá `journalctl -u jarvis-whatsapp-bridge` y actualizá Evolution API."
+            )
+        else:
+            send(_whatsapp_capabilities_fallback_text())
+        return
+
+    # Toca del menú interactivo → enriquecer texto antes de IA / comandos
+    text = _expand_whatsapp_menu_row_selection(text)
 
     # --- Confirmación de comando pendiente ---
     if phone in _pending_cmd:
@@ -2076,6 +3121,34 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
             send("❌ Comando cancelado.")
         return
 
+    # --- Confirmación de evento en Google Calendar (propuesta previa del modelo) ---
+    if phone in _pending_calendar:
+        tcal = text.strip().upper()
+        if tcal in ("SI", "SÍ", "S", "YES", "Y"):
+            payload = _pending_calendar.pop(phone, {})
+            try:
+                pl = google_workspace.normalize_calendar_payload(payload)
+                ev = google_workspace.create_calendar_event(
+                    pl["title"],
+                    pl["start"],
+                    end_iso=pl.get("end"),
+                    description=pl.get("description"),
+                )
+                link = (ev.get("htmlLink") or "").strip()
+                send(
+                    "✅ Listo, quedó en tu Google Calendar."
+                    + (f"\n{link}" if link else "")
+                )
+            except Exception as e:
+                logger.exception("[%s] create_calendar_event", phone)
+                send(f"❌ No se pudo crear el evento: {e}")
+            return
+        if tcal in ("NO", "N", "CANCELAR"):
+            _pending_calendar.pop(phone, None)
+            send("Ok, no lo agendé en el calendario.")
+            return
+        _pending_calendar.pop(phone, None)
+
     # --- Notas del usuario: guardar / listar sin confirmación SI (no pasan por CMD:) ---
     early_note = _user_text_extract_save_note(text)
     if early_note:
@@ -2085,6 +3158,24 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
 
     if _user_wants_list_notes(text):
         send(_format_notes_list_for_whatsapp())
+        return
+
+    # --- Jarvis Cripto (misma lógica que Telegram; user_id = número WhatsApp) ---
+    from crypto.commands import try_handle_crypto_command
+
+    crypto_reply = try_handle_crypto_command(text, phone, _get_bridge_crypto_service())
+    if crypto_reply is not None:
+        for i in range(0, len(crypto_reply), 3500):
+            send(crypto_reply[i : i + 3500])
+        prep = _get_bridge_crypto_service().peek_last_prepared(phone)
+        if prep and "🧾 Swap preparado" in crypto_reply:
+            _send_wa_document(
+                jid,
+                prep.swap_transaction_base64.encode("ascii"),
+                "jupiter_swap_tx.b64.txt",
+                "TX base64 para firmar en wallet.",
+                reply_quote=reply_quote,
+            )
         return
 
     # --- Guardar imagen (editada o no) en DRR vía PATCH /Producto (Swagger: ProductoPatchRequest) ---
@@ -2150,6 +3241,90 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
             "No tengo la imagen anterior en memoria para editarla. "
             "Pedí de nuevo la imagen del producto y después la edición."
         )
+        return
+
+    # --- Google Calendar: el modelo devuelve JSON; el usuario confirma con SI/NO ---
+    cal_j = google_workspace.extract_json_after_marker(reply, "CALENDAR_PROPUESTA:")
+    reply_rest = (
+        google_workspace.strip_marker_and_json(reply, "CALENDAR_PROPUESTA:")
+        if cal_j
+        else reply
+    )
+    if cal_j:
+        try:
+            payload = google_workspace.normalize_calendar_payload(cal_j)
+        except Exception as e:
+            send(f"❌ Calendario (datos inválidos): {e}")
+            if reply_rest.strip():
+                send(reply_rest[:4000])
+            return
+        if not google_workspace.oauth_configured():
+            send(
+                "📅 Falta configurar OAuth de Google en el servidor. "
+                "Ver `docs/GOOGLE_CALENDAR_DRIVE.md` (variable GOOGLE_OAUTH_CLIENT_SECRETS)."
+            )
+            if reply_rest.strip():
+                send(reply_rest[:4000])
+            return
+        if not google_workspace.is_authorized():
+            prefix = _jarvis_public_base() or "http://TU_VPS"
+            send(
+                "📅 Para usar tu Google Calendar, conectá la cuenta una vez en el navegador:\n"
+                f"👉 {prefix}/admin/google/oauth/start?token=(tu ADMIN_PANEL_TOKEN)\n\n"
+                "Reemplazá el token por el de tu `.env` (ADMIN_PANEL_TOKEN o AGENT_SECRET)."
+            )
+            if reply_rest.strip():
+                send(reply_rest[:4000])
+            return
+        _pending_calendar[phone] = payload
+        send(
+            "📅 ¿Lo agendo en tu Google Calendar?\n\n"
+            + google_workspace.format_event_for_user(payload)
+            + "\n\nRespondé *SI* para confirmar o *NO* para cancelar."
+        )
+        rr = reply_rest.strip()
+        if rr.startswith("NOTA:"):
+            note = rr.replace("NOTA:", "", 1).strip()
+            _, fn = _save_note_file(note)
+            send(f"📝 Nota guardada ({fn}):\n{note}")
+        elif rr:
+            send(rr[:4000])
+        return
+
+    # --- Google Drive: subir archivo ya guardado en notes/ o wa_inbox/ ---
+    dm = re.search(r"(?mi)^DRIVE_SUBIR:\s*(\S+)\s*$", reply)
+    if dm:
+        rel = dm.group(1).strip()
+        if rel.lower() in ("ultimo", "último", "last", "reciente"):
+            rel = _last_inbox_media_rel.get(phone, "")
+        rest = re.sub(r"(?mi)^DRIVE_SUBIR:\s*\S+\s*", "", reply, count=1).strip()
+        path = _inbox_allowed_path(rel)
+        if not path or not path.is_file():
+            send(f"❌ No encuentro el archivo para Drive: `{rel or '(vacío)'}`")
+            if rest:
+                send(rest[:4000])
+            return
+        if not google_workspace.oauth_configured() or not google_workspace.is_authorized():
+            prefix = _jarvis_public_base() or "http://TU_VPS"
+            send(
+                "📁 Para subir a Google Drive conectá la cuenta:\n"
+                f"👉 {prefix}/admin/google/oauth/start?token=(ADMIN_PANEL_TOKEN)"
+            )
+            if rest:
+                send(rest[:4000])
+            return
+        try:
+            up = google_workspace.upload_file_to_drive(path, drive_name=path.name)
+            link = (up.get("webViewLink") or "").strip()
+            msg = f"✅ Subido a Google Drive: {up.get('name')}"
+            if link:
+                msg += f"\n{link}"
+            send(msg)
+        except Exception as e:
+            logger.exception("[%s] drive upload", phone)
+            send(f"❌ Error subiendo a Drive: {e}")
+        if rest:
+            send(rest[:4000])
         return
 
     # --- Parseo de prefijos especiales ---
@@ -2489,6 +3664,8 @@ def status(request: Request):
         "active_sessions": len([p for p, exp in _sessions.items() if datetime.now() < exp]),
         "whatsapp_transcribe_local_first": WHATSAPP_TRANSCRIBE_LOCAL_FIRST,
         "openai_configured": bool(OPENAI_API_KEY),
+        "google_oauth_client_configured": google_workspace.oauth_configured(),
+        "google_authorized": google_workspace.is_authorized(),
         # Si falta, el proceso en el VPS es viejo: el panel de logout devolverá 404 en todas las rutas.
         "bridge_features": {
             "evolution_logout_routes": True,
@@ -2498,6 +3675,10 @@ def status(request: Request):
             "short_routes_j": True,
             "admin_inbox_panel": True,
             "admin_server_panel": True,
+            "home_clock": True,
+            "home_restart_api": "/api/home/restart",
+            "jarvis_web_chat": "/jarvis-chat",
+            "jarvis_web_chat_api": "/api/jarvis-web/chat",
         },
         "whatsapp_debug_log": str(LOG_FILE),
         "whatsapp_debug_log_enabled": debug_log_enabled(),
@@ -2824,6 +4005,121 @@ def admin_whatsapp_page(request: Request):
     return HTMLResponse("<h3>Panel admin no disponible (archivo html no encontrado).</h3>", status_code=404)
 
 
+@app.get("/admin/google/oauth/start")
+def google_oauth_start(request: Request):
+    """Redirige a Google para autorizar Calendar + Drive (requiere token admin en la URL o header)."""
+    _require_admin(request)
+    if not google_workspace.oauth_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Falta GOOGLE_OAUTH_CLIENT_SECRETS (JSON del cliente OAuth). Ver docs/GOOGLE_CALENDAR_DRIVE.md",
+        )
+    st = google_workspace.register_oauth_state()
+    url = google_workspace.build_authorization_url(st)
+    return RedirectResponse(url)
+
+
+@app.get("/admin/google/oauth/callback")
+def google_oauth_callback(request: Request) -> HTMLResponse:
+    """Google redirige aquí con ?code= — no requiere token admin (el state evita CSRF)."""
+    q = dict(request.query_params)
+    google_workspace.oauth_debug_log(
+        "oauth_callback_hit",
+        query_keys=sorted(q.keys()),
+        has_code=bool((q.get("code") or "").strip()),
+        error_param=(q.get("error") or "")[:120],
+        error_description=(q.get("error_description") or "")[:300],
+    )
+    err = (request.query_params.get("error") or "").strip()
+    if not err and not (q.get("code") or "").strip() and not (q.get("state") or "").strip():
+        return HTMLResponse(
+            "<h1>Paso incorrecto</h1>"
+            "<p>No abras <code>/admin/google/oauth/callback</code> a mano (sin parámetros de Google).</p>"
+            "<p>Empezá siempre acá: <code>/admin/google/oauth/start?token=TU_TOKEN_ADMIN</code> "
+            "y dejá que Google te redirija solo al volver.</p>",
+            status_code=400,
+        )
+    if err:
+        edesc = (request.query_params.get("error_description") or "").strip()
+        google_workspace.oauth_debug_log("oauth_callback_google_error", error=err, error_description=edesc[:400])
+        body = f"<h1>Error OAuth (Google)</h1><p><strong>{html.escape(err)}</strong></p>"
+        if edesc:
+            body += f"<p>{html.escape(edesc)}</p>"
+        body += (
+            "<p>Revisá <code>logs/google_oauth.jsonl</code> en el servidor o "
+            "<code>/admin/google/oauth/log?token=…</code> (últimas líneas).</p>"
+        )
+        return HTMLResponse(body, status_code=400)
+    state = unquote((request.query_params.get("state") or "").strip())
+    code_verifier = google_workspace.consume_oauth_state(state)
+    if code_verifier is None:
+        return HTMLResponse(
+            "<h1>Estado inválido o expirado</h1>"
+            "<p>Volvé a abrir <strong>en una sola ventana</strong>:</p>"
+            "<p><code>/admin/google/oauth/start?token=TU_TOKEN_ADMIN</code></p>"
+            "<p>No uses favoritos en el callback, no recargues esa página y no reinicies el bridge "
+            "hasta terminar. El estado se guarda en disco en <code>logs/oauth_pending_states.json</code>.</p>",
+            status_code=400,
+        )
+    try:
+        google_workspace.finish_oauth_authorization_response(
+            str(request.url),
+            code_verifier=code_verifier,
+        )
+    except Exception as e:
+        logger.exception("google oauth callback")
+        return HTMLResponse(
+            f"<h1>Error al guardar el token</h1><pre>{html.escape(str(e))}</pre>"
+            "<p>Detalle también en <code>logs/google_oauth.jsonl</code>.</p>",
+            status_code=500,
+        )
+    return HTMLResponse(
+        "<h1>Google conectado</h1>"
+        "<p>Podés cerrar esta ventana. Calendar y Drive ya están disponibles en Jarvis.</p>"
+    )
+
+
+@app.get("/admin/google/status")
+def google_status_bridge(request: Request) -> JSONResponse:
+    _require_admin(request)
+    return JSONResponse(
+        {
+            "oauth_client_configured": google_workspace.oauth_configured(),
+            "authorized": google_workspace.is_authorized(),
+            "redirect_uri": google_workspace.redirect_uri(),
+            "oauth_redirect_warning": google_workspace.oauth_redirect_uri_warning(),
+            "token_path": str(google_workspace.token_path()),
+            "calendar_id": google_workspace.calendar_id(),
+            "timezone": google_workspace.default_timezone(),
+            "oauth_debug_log": str(BASE_DIR / "logs" / "google_oauth.jsonl"),
+            "oauth_debug_enabled": (os.getenv("GOOGLE_OAUTH_DEBUG_LOG", "1").strip().lower() in ("1", "true", "yes", "si", "sí")),
+        }
+    )
+
+
+@app.get("/admin/google/oauth/log")
+def google_oauth_log_tail(request: Request, limit: int = 40) -> JSONResponse:
+    """Últimas entradas del log OAuth (JSONL) para diagnóstico remoto."""
+    _require_admin(request)
+    path = BASE_DIR / "logs" / "google_oauth.jsonl"
+    limit = max(1, min(int(limit or 40), 200))
+    rows: list[dict] = []
+    if path.is_file():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines[-limit:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    rows.append({"raw": line[:200]})
+        except OSError as e:
+            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "path": str(path), "count": len(rows), "entries": rows})
+
+
 @app.get("/admin/inbox")
 def admin_inbox_page() -> HTMLResponse:
     panel_path = BASE_DIR / "admin_inbox_panel.html"
@@ -3047,11 +4343,7 @@ async def webhook(request: Request):
         message = data.get("message", {})
         # Citamos el mensaje entrante para que la respuesta quede en el mismo hilo (móvil + PC).
         reply_quote = _build_evolution_quote(key, message)
-        text_check = (
-            message.get("conversation")
-            or message.get("extendedTextMessage", {}).get("text")
-            or ""
-        ).strip()
+        text_check = _extract_plain_text_from_whatsapp_message(message)
         cutoff = datetime.now() - timedelta(seconds=10)
         _sent_texts[:] = [(j, t, ts) for j, t, ts in _sent_texts if ts > cutoff]
         if any((t == text_check and j == jid) for j, t, _ in _sent_texts):
@@ -3227,7 +4519,7 @@ async def webhook(request: Request):
                             _voice_busy.discard(user_key)
                     return {"ok": True}
             saved_fm = await asyncio.to_thread(
-                _persist_whatsapp_inbox_media, message, media_key_id, owner_phone
+                _persist_inbox_and_track, message, media_key_id, owner_phone
             )
             if saved_fm:
                 await asyncio.to_thread(
@@ -3243,7 +4535,7 @@ async def webhook(request: Request):
 
         # Foto/video/archivo con leyenda: archivar en wa_inbox sin mensaje extra.
         await asyncio.to_thread(
-            _persist_whatsapp_inbox_media, message, media_key_id, owner_phone
+            _persist_inbox_and_track, message, media_key_id, owner_phone
         )
         await asyncio.to_thread(
             lambda: _process_message(text_check, owner_phone, owner_jid, reply_quote=reply_quote),
@@ -3285,11 +4577,7 @@ async def webhook(request: Request):
 
     message = data.get("message", {})
     reply_quote = _build_evolution_quote(key, message)
-    text = (
-        message.get("conversation")
-        or message.get("extendedTextMessage", {}).get("text")
-        or ""
-    ).strip()
+    text = _extract_plain_text_from_whatsapp_message(message)
 
     # Si no hay texto, intentar audio (nota de voz) y transcribir.
     if not text:
@@ -3462,7 +4750,7 @@ async def webhook(request: Request):
             return {"ok": True}
 
         saved_in = await asyncio.to_thread(
-            _persist_whatsapp_inbox_media, message, media_key_id, phone
+            _persist_inbox_and_track, message, media_key_id, phone
         )
         if saved_in:
             await asyncio.to_thread(
@@ -3477,7 +4765,7 @@ async def webhook(request: Request):
         return {"ok": True}
 
     # Procesar en thread para no bloquear el event loop de FastAPI
-    await asyncio.to_thread(_persist_whatsapp_inbox_media, message, media_key_id, phone)
+    await asyncio.to_thread(_persist_inbox_and_track, message, media_key_id, phone)
     await asyncio.to_thread(
         lambda: _process_message(text, phone, jid, reply_quote=reply_quote),
     )

@@ -113,10 +113,19 @@ Si **nginx** solo reenvía parte de las URLs, `/walogout` puede devolver 404. Ha
 2. A partir de ahí, chateá normalmente igual que con Telegram.
 
 **Comandos que entiende Jarvis:**
-- Texto libre → responde con Claude
-- Si Claude sugiere un comando del servidor → te pregunta confirmación → respondé `SI` para ejecutar
-- Búsquedas web → automático cuando Claude usa `BUSCAR:`
-- Notas → guardadas en `notes/` cuando Claude usa `NOTA:`
+- Texto libre → responde con la IA (Gemini/Claude según `.env`)
+- Si sugiere un comando del servidor → te pregunta confirmación → respondé `SI` para ejecutar
+- Búsquedas web → cuando el modelo usa `BUSCAR:`
+- Imágenes / edición / audio → `IMAGEN:`, edición de última imagen, `AUDIO:` (ver `agent_prompt.txt`)
+- Productos DRR → `PRODUCTOS:`
+- Google Calendar / Drive → OAuth configurado; `CALENDAR_PROPUESTA:`, `DRIVE_SUBIR:`
+- Notas → `NOTA:` / listado según prompt
+
+**Menú:** `menú`, `/menu`, `/start` y **«qué podés hacer»** usan el mismo `WHATSAPP_MENU_BUTTONS_SPEC`: varios mensajes de hasta **3 botones** cada uno (límite de WhatsApp). El texto del primer mensaje puede personalizarse con `WHATSAPP_HELP_*` cuando la frase es de ayuda.
+
+El bridge envía primero `sendButtons` con el JSON plano que espera **Evolution API** (`type: reply` en cada botón). Si tu instancia usa Baileys y los botones no se ven como reply nativos, Evolution puede mostrar otro formato; como respaldo: `WHATSAPP_MENU_LIST_FALLBACK=1` envía **lista** con **todas** las opciones (hasta 10 filas), no solo tres.
+
+Ítems: `WHATSAPP_MENU_BUTTONS_SPEC` en `.env` (ver `.env.example`).
 
 **La sesión expira** después de `WHATSAPP_SESSION_HOURS` horas. Volvé a mandar la clave para reactivar.
 

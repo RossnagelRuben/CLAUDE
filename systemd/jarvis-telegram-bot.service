@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Telegram Bot (python-telegram-bot / jarvis_bot.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telegram-bot
+EnvironmentFile=-/root/telegram-bot/.env
+ExecStart=/root/telegram-bot/venv/bin/python jarvis_bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/telegram-bot/jarvis_stdout.log
+StandardError=append:/root/telegram-bot/jarvis_stdout.log
+
+[Install]
+WantedBy=multi-user.target

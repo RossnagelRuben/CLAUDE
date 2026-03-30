@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jarvis Bot</title>
+    <style>
+      :root {
+        --bg: #0a0b0e;
+        --card: #12151c;
+        --text: #e8eaed;
+        --muted: #6b7280;
+        --line: rgba(255, 255, 255, 0.08);
+        --accent: #8aa4c7;
+        --user: #182030;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+        letter-spacing: 0.01em;
+      }
+      .app {
+        height: 100dvh;
+        max-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      header {
+        flex-shrink: 0;
+        padding: 0.85rem clamp(1rem, 3vw, 2rem);
+        border-bottom: 1px solid var(--line);
+      }
+      .header-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+      header h1 {
+        margin: 0;
+        font-size: clamp(0.95rem, 2.5vw, 1.05rem);
+        font-weight: 500;
+        letter-spacing: 0.05em;
+      }
+      .btn-header {
+        flex-shrink: 0;
+        font-size: 0.8rem;
+        padding: 0.4rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font-weight: 500;
+      }
+      .btn-header:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.05);
+        border-color: rgba(255, 255, 255, 0.12);
+      }
+      .btn-header.d-none {
+        display: none !important;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+        width: 100%;
+        max-width: 100%;
+        padding: 0 clamp(0.75rem, 2.5vw, 2rem);
+        padding-bottom: env(safe-area-inset-bottom, 0);
+      }
+      #authPanel,
+      #chatPanel {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        width: 100%;
+        max-width: 100%;
+      }
+      #chatPanel.d-none,
+      #authPanel.d-none {
+        display: none !important;
+      }
+      #authPanel {
+        overflow-y: auto;
+        padding-bottom: 1rem;
+        -webkit-overflow-scrolling: touch;
+      }
+      /* Solo el historial hace scroll; el compositor queda fijo abajo */
+      .chat-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 0.35rem;
+      }
+      .chat-footer {
+        flex-shrink: 0;
+        padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0));
+        background: linear-gradient(to top, var(--bg) 70%, transparent);
+      }
+      label.lbl {
+        display: block;
+        font-size: 0.75rem;
+        color: var(--muted);
+        margin-bottom: 0.4rem;
+      }
+      input[type="password"],
+      textarea {
+        width: 100%;
+        padding: 0.65rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: #08090c;
+        color: var(--text);
+        font-size: 0.9375rem;
+      }
+      textarea:focus,
+      input:focus {
+        outline: none;
+        border-color: rgba(138, 164, 199, 0.35);
+      }
+      button.primary {
+        margin-top: 0.75rem;
+        width: 100%;
+        padding: 0.65rem;
+        border-radius: 10px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--text);
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button.primary:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      #messages {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: clamp(0.65rem, 1.5vw, 1rem);
+        background: var(--card);
+        min-height: 8rem;
+      }
+      .bubble {
+        max-width: min(92%, 52rem);
+        padding: 0.5rem 0.65rem;
+        border-radius: 12px;
+        margin-bottom: 0.45rem;
+        font-size: clamp(0.85rem, 1.6vw, 0.92rem);
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .bubble.user {
+        margin-left: auto;
+        background: var(--user);
+        border: 1px solid var(--line);
+      }
+      .bubble.bot {
+        margin-right: auto;
+        background: #0e1118;
+        border: 1px solid var(--line);
+      }
+      .bubble.bot img {
+        max-width: min(100%, 48rem);
+        height: auto;
+        border-radius: 8px;
+        display: block;
+        margin-top: 0.35rem;
+      }
+      .bubble.bot audio {
+        width: 100%;
+        max-width: 32rem;
+        margin-top: 0.35rem;
+      }
+      .bubble.bot a.file-dl {
+        color: var(--accent);
+        font-size: 0.85rem;
+        display: inline-block;
+        margin-top: 0.35rem;
+      }
+      .composer {
+        display: flex;
+        align-items: stretch;
+        gap: 0;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #08090c;
+        overflow: hidden;
+      }
+      .composer textarea {
+        flex: 1;
+        min-width: 0;
+        border: none;
+        border-radius: 0;
+        min-height: 2.75rem;
+        max-height: 8rem;
+        resize: none;
+        padding: 0.65rem 0.5rem;
+      }
+      .btn-icon {
+        flex-shrink: 0;
+        width: 2.75rem;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 0.15s, background 0.15s;
+      }
+      .btn-icon:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .btn-icon.has-file {
+        color: var(--accent);
+      }
+      .btn-send {
+        flex-shrink: 0;
+        min-width: 3rem;
+        border: none;
+        border-left: 1px solid var(--line);
+        background: transparent;
+        color: var(--accent);
+        font-size: 1.15rem;
+        cursor: pointer;
+        padding: 0 1rem;
+      }
+      .btn-send:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .btn-send:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .attach-hint {
+        font-size: 0.7rem;
+        color: var(--muted);
+        margin: 0 0 0.35rem 0;
+        padding: 0 0.15rem;
+      }
+      .err {
+        color: #e88;
+        font-size: 0.8rem;
+        margin-top: 0.35rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div class="header-row">
+          <h1>Jarvis Bot</h1>
+          <button type="button" class="btn-header d-none" id="btnLogout" title="Cerrar sesión y volver al login">
+            Salir
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <div id="authPanel">
+          <form id="authForm" autocomplete="off" novalidate>
+            <label class="lbl" for="tok">Clave de acceso</label>
+            <input
+              type="password"
+              id="tok"
+              name="jarvis_web_key"
+              placeholder="Ingresá la clave"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              inputmode="text"
+            />
+            <p class="err" id="authErr"></p>
+            <button type="submit" class="primary" id="btnLogin">Entrar</button>
+          </form>
+        </div>
+
+        <div id="chatPanel" class="d-none">
+          <div class="chat-scroll" id="chatScroll" role="log" aria-label="Mensajes">
+            <div id="messages"></div>
+          </div>
+          <div class="chat-footer">
+            <p class="attach-hint">Adjuntá una imagen para editarla con la IA (Gemini). PDF/Word: solo imágenes por ahora.</p>
+            <input
+              type="file"
+              id="fileInput"
+              class="visually-hidden"
+              accept="image/*,.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              tabindex="-1"
+            />
+            <form id="chatForm" class="composer" autocomplete="off">
+              <button type="button" class="btn-icon" id="btnAttach" title="Adjuntar imagen o archivo" aria-label="Adjuntar imagen o archivo">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21.44 11.05l-9.19 9.19a4.5 4.5 0 0 1-6.36-6.36l8.49-8.49a3 3 0 0 1 4.24 4.24l-8.3 8.3a1.5 1.5 0 0 1-2.12-2.12l7.78-7.79" />
+                </svg>
+              </button>
+              <textarea id="msgInput" rows="1" placeholder="Escribí un mensaje…"></textarea>
+              <button type="submit" class="btn-send" id="sendBtn" title="Enviar">→</button>
+            </form>
+            <p class="err" id="chatErr"></p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      (function () {
+        var LS_TOK = "jarvis_web_chat_token";
+        var LS_SID = "jarvis_web_chat_session_id";
+        function sid() {
+          var s = localStorage.getItem(LS_SID);
+          if (!s) {
+            s =
+              (crypto.randomUUID && crypto.randomUUID()) ||
+              "s-" + String(Date.now()) + "-" + String(Math.random()).slice(2);
+            localStorage.setItem(LS_SID, s);
+          }
+          return s;
+        }
+
+        function normalizeClientToken(s) {
+          if (!s) return "";
+          var t = String(s)
+            .trim()
+            .replace(/[\u200b\u200c\u200d\ufeff\u2060]/g, "")
+            .trim();
+          t = t.replace(/[０-９]/g, function (ch) {
+            return String.fromCharCode(ch.charCodeAt(0) - 0xff10 + 0x30);
+          });
+          return t;
+        }
+        var authPanel = document.getElementById("authPanel");
+        var chatPanel = document.getElementById("chatPanel");
+        var chatScroll = document.getElementById("chatScroll");
+        var authForm = document.getElementById("authForm");
+        var chatForm = document.getElementById("chatForm");
+        var tokEl = document.getElementById("tok");
+        var btnLogin = document.getElementById("btnLogin");
+        var messages = document.getElementById("messages");
+        var msgInput = document.getElementById("msgInput");
+        var sendBtn = document.getElementById("sendBtn");
+        var authErr = document.getElementById("authErr");
+        var chatErr = document.getElementById("chatErr");
+        var fileInput = document.getElementById("fileInput");
+        var btnAttach = document.getElementById("btnAttach");
+        var btnLogout = document.getElementById("btnLogout");
+
+        function scrollChatToBottom() {
+          if (chatScroll) {
+            chatScroll.scrollTop = chatScroll.scrollHeight;
+          }
+        }
+
+        function showChat() {
+          authPanel.classList.add("d-none");
+          chatPanel.classList.remove("d-none");
+          if (btnLogout) btnLogout.classList.remove("d-none");
+        }
+        function showAuth() {
+          chatPanel.classList.add("d-none");
+          authPanel.classList.remove("d-none");
+          if (btnLogout) btnLogout.classList.add("d-none");
+        }
+        function appendBubble(text, who) {
+          var d = document.createElement("div");
+          d.className = "bubble " + (who === "user" ? "user" : "bot");
+          d.textContent = text;
+          messages.appendChild(d);
+          scrollChatToBottom();
+        }
+
+        var pendingAudioBubble = null;
+
+        function appendBotParts(parts) {
+          var d = document.createElement("div");
+          d.className = "bubble bot";
+          if (!parts || !parts.length) {
+            d.textContent = "(sin respuesta)";
+            messages.appendChild(d);
+            scrollChatToBottom();
+            return;
+          }
+          var textParts = [];
+          var mediaParts = [];
+          parts.forEach(function (p) {
+            if (!p || !p.type) return;
+            if (p.type === "text") textParts.push(p);
+            else mediaParts.push(p);
+          });
+          function appendPart(p) {
+            if (p.type === "text") {
+              var t = document.createElement("div");
+              t.style.whiteSpace = "pre-wrap";
+              t.textContent = p.text || "";
+              d.appendChild(t);
+            } else if (p.type === "image") {
+              var img = document.createElement("img");
+              img.alt = p.caption || "imagen";
+              img.src = "data:" + (p.mime || "image/png") + ";base64," + (p.base64 || "");
+              img.loading = "lazy";
+              d.appendChild(img);
+              if (p.caption) {
+                var c = document.createElement("div");
+                c.style.fontSize = "0.8rem";
+                c.style.color = "var(--muted)";
+                c.style.marginTop = "0.25rem";
+                c.textContent = p.caption;
+                d.appendChild(c);
+              }
+            } else if (p.type === "audio") {
+              var aud = document.createElement("audio");
+              aud.controls = true;
+              aud.src = "data:" + (p.mime || "audio/mpeg") + ";base64," + (p.base64 || "");
+              d.appendChild(aud);
+            } else if (p.type === "file") {
+              var a = document.createElement("a");
+              a.className = "file-dl";
+              a.href = "data:" + (p.mime || "application/octet-stream") + ";base64," + (p.base64 || "");
+              a.download = p.filename || "adjunto.bin";
+              a.textContent = "Descargar " + (p.filename || "archivo");
+              d.appendChild(a);
+            }
+          }
+          textParts.forEach(appendPart);
+          mediaParts.forEach(appendPart);
+          messages.appendChild(d);
+          scrollChatToBottom();
+        }
+
+        function readNdjsonChat(r) {
+          return new Promise(function (resolve, reject) {
+            if (!r.ok) {
+              r.json()
+                .then(function (j) {
+                  reject({ j: j });
+                })
+                .catch(function () {
+                  reject({});
+                });
+              return;
+            }
+            var reader = r.body.getReader();
+            var dec = new TextDecoder();
+            var buf = "";
+            var gotFinal = false;
+            function consumeLine(line) {
+              line = line.trim();
+              if (!line) return;
+              var j;
+              try {
+                j = JSON.parse(line);
+              } catch (e) {
+                return;
+              }
+              if (j.partial && j.parts) {
+                appendBotParts(j.parts);
+                pendingAudioBubble = messages.lastElementChild;
+                scrollChatToBottom();
+              } else if (j.parts && j.parts.length) {
+                if (pendingAudioBubble && pendingAudioBubble.parentNode) {
+                  pendingAudioBubble.remove();
+                  pendingAudioBubble = null;
+                }
+                appendBotParts(j.parts);
+                gotFinal = true;
+              }
+            }
+            function pump() {
+              reader
+                .read()
+                .then(function (res) {
+                  if (res.value && res.value.length) {
+                    buf += dec.decode(res.value, { stream: !res.done });
+                  }
+                  if (res.done) {
+                    if (buf.trim()) {
+                      buf.split("\n").forEach(consumeLine);
+                    }
+                    if (!gotFinal) {
+                      reject(new Error("stream incompleto"));
+                    } else {
+                      resolve({ streamed: true });
+                    }
+                    return;
+                  }
+                  var lines = buf.split("\n");
+                  buf = lines.pop() || "";
+                  for (var i = 0; i < lines.length; i++) {
+                    consumeLine(lines[i]);
+                  }
+                  return pump();
+                })
+                .catch(reject);
+            }
+            pump();
+          });
+        }
+
+        function syncAttachState() {
+          if (!btnAttach || !fileInput) return;
+          if (fileInput.files && fileInput.files[0]) {
+            btnAttach.classList.add("has-file");
+          } else {
+            btnAttach.classList.remove("has-file");
+          }
+        }
+
+        var saved = localStorage.getItem(LS_TOK);
+        if (saved) {
+          tokEl.value = normalizeClientToken(saved);
+        }
+
+        function httpJson(r) {
+          return r.text().then(function (txt) {
+            var j = {};
+            try {
+              j = txt ? JSON.parse(txt) : {};
+            } catch (e) {}
+            return { status: r.status, ok: r.ok, j: j };
+          });
+        }
+
+        function verifyKeyChain(t, done) {
+          var q = "/api/jarvis-web/verify?token=" + encodeURIComponent(t);
+          fetch(q, { method: "GET", credentials: "same-origin" })
+            .then(httpJson)
+            .then(function (x) {
+              if (x.status === 404) {
+                return fetch("/api/jarvis-web/verify", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ token: t }),
+                  credentials: "same-origin",
+                }).then(httpJson);
+              }
+              return x;
+            })
+            .then(function (x) {
+              if (x.status === 404) {
+                return fetch("/api/jarvis-web/chat", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    token: t,
+                    message: "",
+                    session_id: sid(),
+                    verify_only: true,
+                  }),
+                  credentials: "same-origin",
+                }).then(httpJson);
+              }
+              return x;
+            })
+            .then(function (x) {
+              if (x.ok && x.j && x.j.ok === true) {
+                done(null);
+                return;
+              }
+              var det = x.j && x.j.detail;
+              if (typeof det === "string") {
+                if (det === "Not Found" || x.status === 404) {
+                  done(
+                    "El servidor no tiene las rutas de verificación actualizadas. Subí jarvis_web_chat.py y reiniciá el proceso."
+                  );
+                  return;
+                }
+                done(det);
+                return;
+              }
+              done("Clave incorrecta.");
+            })
+            .catch(function () {
+              done("Error de red o respuesta inválida.");
+            });
+        }
+
+        function doLogin() {
+          authErr.textContent = "";
+          var t = normalizeClientToken(tokEl.value || "");
+          if (!t) {
+            authErr.textContent = "Ingresá la clave.";
+            return;
+          }
+          btnLogin.disabled = true;
+          verifyKeyChain(t, function (err) {
+            btnLogin.disabled = false;
+            if (err) {
+              authErr.textContent = err;
+              localStorage.removeItem(LS_TOK);
+              return;
+            }
+            localStorage.setItem(LS_TOK, t);
+            showChat();
+            msgInput.focus();
+          });
+        }
+
+        authForm.addEventListener("submit", function (e) {
+          e.preventDefault();
+          doLogin();
+        });
+
+        if (btnAttach && fileInput) {
+          btnAttach.addEventListener("click", function () {
+            fileInput.click();
+          });
+          fileInput.addEventListener("change", syncAttachState);
+        }
+
+        if (btnLogout) {
+          btnLogout.addEventListener("click", function () {
+            localStorage.removeItem(LS_TOK);
+            messages.innerHTML = "";
+            chatErr.textContent = "";
+            if (fileInput) fileInput.value = "";
+            syncAttachState();
+            showAuth();
+            if (tokEl) tokEl.focus();
+          });
+        }
+
+        function fileToBase64(file, cb) {
+          var r = new FileReader();
+          r.onload = function () {
+            var s = String(r.result || "");
+            var i = s.indexOf("base64,");
+            cb(i >= 0 ? s.slice(i + 7) : null);
+          };
+          r.onerror = function () {
+            cb(null);
+          };
+          r.readAsDataURL(file);
+        }
+
+        function isImageFile(f) {
+          return f && f.type && f.type.indexOf("image/") === 0;
+        }
+
+        function sendMsg() {
+          chatErr.textContent = "";
+          var t = normalizeClientToken(localStorage.getItem(LS_TOK) || "");
+          if (!t) {
+            showAuth();
+            return;
+          }
+          var text = (msgInput.value || "").trim();
+          var f = fileInput && fileInput.files && fileInput.files[0];
+
+          if (!text && !f) return;
+
+          if (f && !isImageFile(f)) {
+            chatErr.textContent =
+              "La edición con IA acepta solo imágenes (JPG, PNG, WebP…). PDF y Word: no soportados aún.";
+            return;
+          }
+
+          var userLine = text + (f ? " [imagen adjunta]" : "");
+          if (userLine.trim()) {
+            appendBubble(userLine, "user");
+          }
+          msgInput.value = "";
+          sendBtn.disabled = true;
+
+          function doPost(b64, mime) {
+            var payload = {
+              token: t,
+              message: text,
+              session_id: sid(),
+            };
+            if (b64) {
+              payload.image_base64 = b64;
+              payload.image_mime = mime || "image/jpeg";
+            }
+            fetch("/api/jarvis-web/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            })
+              .then(function (r) {
+                var ct = (r.headers.get("content-type") || "").toLowerCase();
+                if (ct.indexOf("ndjson") >= 0) {
+                  return readNdjsonChat(r).then(function () {
+                    return { ok: true, streamed: true };
+                  });
+                }
+                return r.json().then(function (j) {
+                  return { ok: r.ok, j: j, streamed: false };
+                });
+              })
+              .then(function (x) {
+                if (x.streamed) return;
+                if (!x.ok) {
+                  chatErr.textContent = (x.j && x.j.detail) || "Error";
+                  if (x.j && x.j.detail && String(x.j.detail).indexOf("Token") >= 0) {
+                    localStorage.removeItem(LS_TOK);
+                    showAuth();
+                  }
+                  return;
+                }
+                if (x.j.parts && x.j.parts.length) {
+                  appendBotParts(x.j.parts);
+                } else {
+                  appendBubble(x.j.reply || "", "bot");
+                }
+              })
+              .catch(function (err) {
+                pendingAudioBubble = null;
+                if (err && err.j && err.j.detail) {
+                  chatErr.textContent = err.j.detail;
+                  if (String(err.j.detail).indexOf("Token") >= 0) {
+                    localStorage.removeItem(LS_TOK);
+                    showAuth();
+                  }
+                  return;
+                }
+                chatErr.textContent = "Sin respuesta del servidor.";
+              })
+              .finally(function () {
+                sendBtn.disabled = false;
+                if (fileInput) {
+                  fileInput.value = "";
+                  syncAttachState();
+                }
+              });
+          }
+
+          if (f) {
+            fileToBase64(f, function (b64) {
+              if (!b64) {
+                chatErr.textContent = "No se pudo leer el archivo.";
+                sendBtn.disabled = false;
+                return;
+              }
+              doPost(b64, f.type || "image/jpeg");
+            });
+          } else {
+            doPost(null, null);
+          }
+        }
+        chatForm.addEventListener("submit", function (e) {
+          e.preventDefault();
+          sendMsg();
+        });
+
+        msgInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendMsg();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>

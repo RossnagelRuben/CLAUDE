@@ -107,6 +107,17 @@ Atajos de logout (mismo cuerpo/query que el resto de logout Evolution):
 | GET | `/admin/server` | Panel HTML (CPU, RAM, disco, gráfico histórico, logs, ajustes de refresco). |
 | GET | `/admin/server/api/snapshot?range=24h` | JSON: instantánea + historial. Valores de `range`: `24h`, `72h`, `7d`. |
 
+### 2.8 Google Calendar / Drive (OAuth)
+
+| Método | Ruta | Para qué sirve |
+|--------|------|----------------|
+| GET | `/admin/google/oauth/start` | Redirige a Google (requiere token admin). Primera conexión de la cuenta. |
+| GET | `/admin/google/oauth/callback` | Callback OAuth (URI autorizada en Google Cloud). |
+| GET | `/admin/google/status` | JSON: OAuth configurado / token válido / `redirect_uri`. |
+| GET | `/admin/google/oauth/log?limit=40` | JSON: últimas líneas de `logs/google_oauth.jsonl` (diagnóstico OAuth). |
+
+Ver `docs/GOOGLE_CALENDAR_DRIVE.md`.
+
 ---
 
 ## 3. Evolution API — `http://TU_IP:8080` (ejemplo)

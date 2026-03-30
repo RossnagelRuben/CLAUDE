@@ -14,3 +14,7 @@ logs/
 notes/
 .venv-bridge/
 data/
+google_token.json
+logs/oauth_pending_states.json
+google_client_secret.json
+*client_secret*.json
