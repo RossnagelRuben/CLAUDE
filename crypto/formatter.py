@@ -4,7 +4,24 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from typing import Any
+
 from crypto.models import PriceQuote, QueryHistoryEntry, QuoteResult, TopCryptoRow
+
+# Degradados para tarjeta web (identidad aproximada por símbolo).
+_SYMBOL_WEB_GRADIENT: dict[str, tuple[str, str]] = {
+    "SOL": ("#9945FF", "#14F195"),
+    "BTC": ("#F7931A", "#4a2800"),
+    "ETH": ("#627EEA", "#1a1a2e"),
+    "DOGE": ("#c2a633", "#2d1f00"),
+    "ADA": ("#0033ad", "#00a8ff"),
+    "XRP": ("#23292f", "#00aae4"),
+    "BNB": ("#f0b90b", "#1e1500"),
+    "MATIC": ("#8247e5", "#0f0518"),
+    "DOT": ("#e6007a", "#1a0a14"),
+    "AVAX": ("#e84142", "#1a0505"),
+    "LINK": ("#375bd2", "#0a1020"),
+}
 
 
 def _fmt_money(d: Decimal, currency: str) -> str:
@@ -15,6 +32,39 @@ def _fmt_money(d: Decimal, currency: str) -> str:
     if d >= Decimal("1"):
         return f"ARS {d:,.2f}"
     return f"ARS {d:.4f}".rstrip("0").rstrip(".").rstrip(",")
+
+
+def price_quote_to_web_card(q: PriceQuote) -> dict[str, Any]:
+    """
+    Payload JSON-serializable para la tarjeta de cotización en jarvis_web_chat.html.
+    """
+    gf, gt = _SYMBOL_WEB_GRADIENT.get(q.symbol, ("#2563eb", "#7c3aed"))
+    ars = _fmt_money(q.price_ars, "ARS") if q.price_ars and q.price_ars > 0 else None
+    out: dict[str, Any] = {
+        "type": "crypto_quote",
+        "symbol": q.symbol,
+        "name": q.name,
+        "price_usd": _fmt_money(q.price_usd, "USD"),
+        "price_ars": ars,
+        "has_ars": bool(ars),
+        "gradient_from": gf,
+        "gradient_to": gt,
+    }
+    if q.percent_change_24h is not None:
+        ch = float(q.percent_change_24h)
+        out["change_24h"] = ch
+        out["change_label"] = f"{ch:+.2f}%"
+        out["change_up"] = ch >= 0
+    else:
+        out["change_24h"] = None
+        out["change_label"] = None
+        out["change_up"] = None
+    if q.market_cap_usd is not None and q.market_cap_usd > 0:
+        out["market_cap_usd"] = _fmt_money(q.market_cap_usd, "USD")
+    else:
+        out["market_cap_usd"] = None
+    out["rank"] = int(q.rank) if q.rank else None
+    return out
 
 
 def format_price_quote(q: PriceQuote) -> str:

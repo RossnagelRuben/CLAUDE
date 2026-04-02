@@ -450,6 +450,7 @@ def _build_home_html() -> str:
       <a href="/admin/whatsapp">WhatsApp — administración</a>
       <a href="/admin/inbox">Bandeja — notas y archivos</a>
       <a href="/jarvis-chat" target="_blank" rel="noopener noreferrer">Jarvis Bot — chat web (misma IA que Telegram)</a>
+      <a href="https://104-225-140-9.sslip.io/n8n/" target="_blank" rel="noopener noreferrer">N8N — automatizaciones</a>
       <a href="/admin/server">Estado del servidor — CPU, RAM y disco</a>
     </nav>
     <div class="panel-restart">
@@ -529,23 +530,80 @@ def _build_home_html() -> str:
 
 
 def _systemctl_restart(unit: str) -> tuple[bool, str]:
+    """
+    Reinicia unidad systemd: ``systemctl``, ``sudo -n systemctl``, y ``service`` (SysV).
+    Antes de reiniciar, ``reset-failed`` (ignora errores) para salir de estado failed.
+    """
+    if not (unit or "").strip():
+        return False, "unidad vacía"
+    unit = unit.strip()
+    base = unit.replace(".service", "").strip()
+
     try:
-        proc = subprocess.run(
-            ["/usr/bin/systemctl", "restart", unit],
+        subprocess.run(
+            ["/usr/bin/systemctl", "reset-failed", unit],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=30,
         )
-        err = (proc.stderr or proc.stdout or "").strip()
-        if proc.returncode != 0:
-            return False, err or f"systemctl falló (código {proc.returncode})"
-        return True, "ok"
-    except FileNotFoundError:
-        return False, "systemctl no encontrado"
-    except subprocess.TimeoutExpired:
-        return False, "timeout al reiniciar"
-    except Exception as e:
-        return False, str(e)[:400]
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    attempts: list[list[str]] = [
+        ["/usr/bin/systemctl", "restart", unit],
+        ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "restart", unit],
+        ["/usr/sbin/service", base, "restart"],
+        ["/usr/bin/sudo", "-n", "/usr/sbin/service", base, "restart"],
+    ]
+    last_err = ""
+    for cmd in attempts:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            err = (proc.stderr or proc.stdout or "").strip()
+            if proc.returncode == 0:
+                logger.info("systemd restart OK: %s (cmd=%s)", unit, cmd[0])
+                return True, "ok"
+            last_err = err or f"falló (código {proc.returncode})"
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            return False, "timeout al reiniciar"
+        except Exception as e:
+            last_err = str(e)[:400]
+    return False, last_err or "no se pudo reiniciar"
+
+
+def _telegram_systemd_candidates() -> list[str]:
+    """
+    Nombres de unidad a probar para el bot de Telegram (JARVIS_SYSTEMD_TELEGRAM puede ser
+    lista separada por comas si en el servidor el unit tiene otro nombre).
+    """
+    raw = os.getenv("JARVIS_SYSTEMD_TELEGRAM", "").strip()
+    out: list[str] = []
+    if raw:
+        for part in raw.split(","):
+            u = part.strip()
+            if u and u not in out:
+                out.append(u)
+    if "jarvis-telegram-bot" not in out:
+        out.append("jarvis-telegram-bot")
+    return out
+
+
+def _systemctl_restart_first_ok(candidates: list[str]) -> tuple[bool, str, str]:
+    """Prueba cada candidato hasta que uno reinicie bien. Devuelve (ok, mensaje, unidad_usada)."""
+    last_err = ""
+    for unit in candidates:
+        ok, msg = _systemctl_restart(unit)
+        if ok:
+            return True, msg, unit
+        last_err = f"{unit}: {msg}"
+    return False, last_err, ""
 
 
 class JarvisRestartBody(BaseModel):
@@ -580,13 +638,17 @@ def api_home_restart(body: JarvisRestartBody) -> JSONResponse:
     parts: list[str] = []
 
     if body.target in ("telegram", "both"):
-        ok_t, msg_t = _systemctl_restart(JARVIS_SYSTEMD_TELEGRAM)
+        tg_units = _telegram_systemd_candidates()
+        ok_t, msg_t, used_t = _systemctl_restart_first_ok(tg_units)
         if not ok_t:
             return JSONResponse(
                 status_code=500,
-                content={"ok": False, "detail": f"Telegram ({JARVIS_SYSTEMD_TELEGRAM}): {msg_t}"},
+                content={
+                    "ok": False,
+                    "detail": f"Telegram (probado: {', '.join(tg_units)}): {msg_t}",
+                },
             )
-        parts.append("Telegram: reiniciado.")
+        parts.append(f"Telegram: reiniciado ({used_t}).")
 
     if body.target in ("whatsapp", "both"):
 
@@ -1219,6 +1281,174 @@ def _ffmpeg_convert_to_wav(input_path: str, output_path: str, phone: str) -> boo
     except Exception as e:
         logger.warning("[%s] ffmpeg convert a wav falló: %s", phone, e)
     return False
+
+
+def _wa_prepare_voice_file_for_whatsapp(
+    phone: str,
+    media_key_id_for_download: str,
+    audio_url: str | None,
+    file_name: str,
+) -> tuple[str, bool, list[Path]] | None:
+    """
+    Descarga el audio a disco y devuelve ruta para transcribir o Gemini Live.
+    Retorna (effective_path, used_base64, paths_a_borrar).
+    """
+    tmp_dir = BASE_DIR / "audio"
+    tmp_dir.mkdir(exist_ok=True, parents=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    suffix = ""
+    try:
+        suffix = Path(file_name).suffix.lower()
+    except Exception:
+        suffix = ""
+    if not suffix:
+        suffix = ".ogg"
+    if suffix.lower() not in (".ogg", ".oga", ".mp3", ".wav", ".m4a"):
+        suffix = ".ogg"
+    tmp_path = tmp_dir / f"wa_voice_{phone}_{ts}{suffix}"
+    audio_bytes = _evolution_download_media_base64(media_key_id_for_download, phone=phone)
+    used_base64 = bool(audio_bytes)
+    total = 0
+    if audio_bytes:
+        with open(tmp_path, "wb") as f:
+            f.write(audio_bytes)
+        total = len(audio_bytes)
+        logger.info("[%s] Descargado audio via base64 bytes=%s", phone, total)
+    elif audio_url:
+        headers = {}
+        if EVOLUTION_API_KEY:
+            headers["apikey"] = EVOLUTION_API_KEY
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=httpx.Timeout(120.0, connect=20.0, read=120.0),
+        ) as client:
+            with client.stream("GET", audio_url, headers=headers) as r:
+                r.raise_for_status()
+                logger.info(
+                    "[%s] Audio GET headers content-type=%r content-length=%r",
+                    phone,
+                    r.headers.get("content-type"),
+                    r.headers.get("content-length"),
+                )
+                with open(tmp_path, "wb") as f:
+                    for chunk in r.iter_bytes():
+                        if chunk:
+                            f.write(chunk)
+                            total += len(chunk)
+        logger.info(
+            "[%s] Descargado audio bytes=%s url=%r",
+            phone,
+            total,
+            (audio_url or "")[:80],
+        )
+    else:
+        logger.warning("[%s] Sin audio_url ni media_key_id para bajar audio", phone)
+        return None
+
+    if total < 1024:
+        logger.warning("[%s] Audio demasiado chico (%s bytes)", phone, total)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+    _inbox_copy_path_to_audio_subdir(tmp_path, phone, file_name)
+    effective_path = str(tmp_path)
+    wav_path = str(tmp_path.with_suffix(".wav"))
+    cleanup: list[Path] = [tmp_path]
+    if wav_path != effective_path:
+        ok = _ffmpeg_convert_to_wav(str(tmp_path), wav_path, phone)
+        if ok:
+            effective_path = wav_path
+            cleanup.append(Path(wav_path))
+    return effective_path, used_base64, cleanup
+
+
+def _wa_cleanup_voice_paths(paths: list[Path]) -> None:
+    for p in paths:
+        try:
+            if p.is_file():
+                p.unlink()
+        except OSError:
+            pass
+
+
+async def _handle_whatsapp_voice_message(
+    jid: str,
+    phone: str,
+    media_key_id_for_download: str,
+    audio_url: str | None,
+    file_name: str,
+    reply_quote: dict | None,
+) -> None:
+    from gemini_voice_shared import gemini_live_reply_mp3_from_path, wa_gemini_voice_enabled
+
+    prep = await asyncio.to_thread(
+        _wa_prepare_voice_file_for_whatsapp,
+        phone,
+        media_key_id_for_download,
+        audio_url,
+        file_name,
+    )
+    if not prep:
+        await asyncio.to_thread(
+            lambda: _send(
+                jid,
+                "❌ No pude descargar el audio. Probá de nuevo.",
+                reply_quote=reply_quote,
+            ),
+        )
+        return
+    eff_path, used_b64, cleanup_paths = prep
+    try:
+        if GEMINI_API_KEY and wa_gemini_voice_enabled():
+            try:
+                mp3 = await asyncio.wait_for(
+                    gemini_live_reply_mp3_from_path(eff_path),
+                    timeout=120,
+                )
+                if mp3:
+                    ok = await asyncio.to_thread(_send_audio_whatsapp, jid, mp3, "jarvis_gemini.mp3")
+                    if ok:
+                        logger.info("[%s] Respuesta de voz Gemini Live enviada por WhatsApp", phone)
+                        return
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Timeout Gemini Live WA; fallback transcripción", phone)
+            except Exception:
+                logger.exception("[%s] Gemini Live voz WA", phone)
+
+        transcription = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: _transcribe_whatsapp_audio(eff_path, phone, used_base64=used_b64),
+            ),
+            timeout=120,
+        )
+        if transcription and _looks_like_valid_transcription(transcription):
+            logger.info("[%s] Audio transcripto. head=%r", phone, transcription[:120])
+            await asyncio.to_thread(
+                lambda: _process_message(
+                    transcription,
+                    phone,
+                    jid,
+                    reply_quote=reply_quote,
+                ),
+            )
+        else:
+            logger.warning(
+                "[%s] Transcripción inválida o vacía. head=%r",
+                phone,
+                (transcription or "")[:120],
+            )
+            await asyncio.to_thread(
+                lambda: _send(
+                    jid,
+                    "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
+                    reply_quote=reply_quote,
+                ),
+            )
+    finally:
+        _wa_cleanup_voice_paths(cleanup_paths)
 
 
 def _looks_like_valid_transcription(txt: str) -> bool:
@@ -3162,8 +3392,19 @@ def _process_message(text: str, phone: str, jid: str, *, reply_quote: dict | Non
 
     # --- Jarvis Cripto (misma lógica que Telegram; user_id = número WhatsApp) ---
     from crypto.commands import try_handle_crypto_command
+    from crypto.formatter import format_price_quote
+    from crypto.nl_price_intent import detect_crypto_price_intent
 
-    crypto_reply = try_handle_crypto_command(text, phone, _get_bridge_crypto_service())
+    _svc_crypto = _get_bridge_crypto_service()
+    crypto_reply = try_handle_crypto_command(text, phone, _svc_crypto)
+    if crypto_reply is None:
+        sym_nl = detect_crypto_price_intent(text)
+        if sym_nl:
+            q_w, err_w = _svc_crypto.get_price_quote_object(phone, sym_nl)
+            if err_w:
+                send(err_w)
+                return
+            crypto_reply = format_price_quote(q_w)
     if crypto_reply is not None:
         for i in range(0, len(crypto_reply), 3500):
             send(crypto_reply[i : i + 3500])
@@ -4205,6 +4446,115 @@ def admin_server_api_snapshot(
     return get_dashboard_payload(rk)
 
 
+def _cleanup_files_older_than(dir_path: Path, older_than_sec: float) -> dict:
+    """
+    Borra SOLO archivos (y symlinks a archivos) dentro de `dir_path` más viejos que `older_than_sec`.
+    No toca carpetas ni datos fuera del directorio.
+    """
+    now_ts = time.time()
+    deleted_files = 0
+    freed_bytes = 0
+    errors = 0
+    scanned = 0
+
+    if not dir_path.exists():
+        return {
+            "dir": str(dir_path),
+            "exists": False,
+            "deleted_files": 0,
+            "freed_bytes": 0,
+            "errors": 0,
+            "scanned_files": 0,
+        }
+
+    # rglob puede ser pesado si hay muchísimos archivos; limitamos a los dirs “tmp/wa/audio”.
+    try:
+        for p in dir_path.rglob("*"):
+            try:
+                if not (p.is_file() or p.is_symlink()):
+                    continue
+                scanned += 1
+                st = p.stat()
+                age = now_ts - float(st.st_mtime)
+                if age < older_than_sec:
+                    continue
+                size = int(getattr(st, "st_size", 0) or 0)
+                # unlink en vez de remove para no intentar borrar carpetas.
+                p.unlink(missing_ok=True)
+                deleted_files += 1
+                freed_bytes += size
+            except Exception:
+                errors += 1
+                logger.exception("admin cleanup: error borrando %s", str(p)[:180])
+    except Exception:
+        errors += 1
+        logger.exception("admin cleanup: rglob falló en %s", str(dir_path)[:180])
+
+    return {
+        "dir": str(dir_path),
+        "exists": True,
+        "deleted_files": deleted_files,
+        "freed_bytes": freed_bytes,
+        "errors": errors,
+        "scanned_files": scanned,
+    }
+
+
+@app.post("/admin/server/api/cleanup")
+async def admin_server_api_cleanup(request: Request) -> dict:
+    """
+    Limpia “residual” para liberar disco: borra archivos temporales/medios viejos.
+    Devuelve un resumen para renderizarlo en modal.
+    """
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    older_than_days = int(body.get("older_than_days", 7) or 7)
+    # Guardrails.
+    older_than_days = max(0, min(365, older_than_days))
+    older_than_sec = float(older_than_days * 86400)
+
+    # Defaults por carpeta (para no borrar “inbox” reciente).
+    audio_days = int(body.get("audio_days", body.get("audio_days", 1) or 1))
+    voice_days = int(body.get("voice_days", body.get("voice_days", 2) or 2))
+    wa_media_days = int(body.get("wa_media_days", body.get("wa_media_days", 30) or 30))
+
+    audio_days = max(0, min(365, audio_days))
+    voice_days = max(0, min(365, voice_days))
+    wa_media_days = max(0, min(365, wa_media_days))
+
+    audio_sec = float(audio_days * 86400)
+    voice_sec = float(voice_days * 86400)
+    wa_sec = float(wa_media_days * 86400)
+
+    results: list[dict] = []
+    # Carpetas temporales del proyecto.
+    results.append(_cleanup_files_older_than(BASE_DIR / "audio", audio_sec))
+    results.append(_cleanup_files_older_than(BASE_DIR / "voice_tmp", voice_sec))
+    # WhatsApp: eliminamos medios antiguos, pero sin tocar notas/archivos que usás como “base”.
+    results.append(_cleanup_files_older_than(WA_INBOX_MEDIA, wa_sec))
+
+    total_deleted = sum(int(r.get("deleted_files", 0) or 0) for r in results)
+    total_freed = sum(int(r.get("freed_bytes", 0) or 0) for r in results)
+
+    return {
+        "ok": True,
+        "policies": {
+            "older_than_days_req": older_than_days,
+            "audio_days": audio_days,
+            "voice_days": voice_days,
+            "wa_media_days": wa_media_days,
+        },
+        "now_iso": datetime.now(timezone.utc).isoformat(),
+        "total_deleted_files": total_deleted,
+        "total_freed_bytes": total_freed,
+        "results": results,
+    }
+
+
 @app.get("/admin/whatsapp/api/config")
 def admin_get_config(request: Request):
     _require_admin(request)
@@ -4410,111 +4760,14 @@ async def webhook(request: Request):
                             ),
                         )
                         try:
-                            def _download_and_transcribe() -> str | None:
-                                tmp_dir = BASE_DIR / "audio"
-                                tmp_dir.mkdir(exist_ok=True, parents=True)
-                                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                                suffix = ""
-                                try:
-                                    suffix = Path(file_name).suffix.lower()
-                                except Exception:
-                                    suffix = ""
-                                if not suffix:
-                                    suffix = ".ogg"
-                                # Si Evolution trae un nombre tipo ".enc", lo normalizamos a ".ogg"
-                                # para que el decoder/faster_whisper tenga algo válido.
-                                if suffix.lower() not in (".ogg", ".oga", ".mp3", ".wav", ".m4a"):
-                                    suffix = ".ogg"
-                                tmp_path = tmp_dir / f"wa_voice_{owner_phone}_{ts}{suffix}"
-                                # 1) Preferimos Evolution base64 (decodificable). 2) Si falla, fallback a GET directo.
-                                audio_bytes = _evolution_download_media_base64(media_key_id_for_download, phone=owner_phone)
-                                used_base64 = bool(audio_bytes)
-                                total = 0
-                                if audio_bytes:
-                                    with open(tmp_path, "wb") as f:
-                                        f.write(audio_bytes)
-                                    total = len(audio_bytes)
-                                    logger.info(
-                                        "[%s] Descargado audio (fromMe) via base64 bytes=%s",
-                                        owner_phone,
-                                        total,
-                                    )
-                                elif audio_url:
-                                    headers = {}
-                                    if EVOLUTION_API_KEY:
-                                        headers["apikey"] = EVOLUTION_API_KEY
-                                    with httpx.Client(
-                                        follow_redirects=True,
-                                        timeout=httpx.Timeout(120.0, connect=20.0, read=120.0),
-                                    ) as client:
-                                        with client.stream("GET", audio_url, headers=headers) as r:
-                                            r.raise_for_status()
-                                            logger.info(
-                                                "[%s] Audio GET headers content-type=%r content-length=%r",
-                                                owner_phone,
-                                                r.headers.get("content-type"),
-                                                r.headers.get("content-length"),
-                                            )
-                                            with open(tmp_path, "wb") as f:
-                                                for chunk in r.iter_bytes():
-                                                    if chunk:
-                                                        f.write(chunk)
-                                                        total += len(chunk)
-                                    logger.info(
-                                        "[%s] Descargado audio (fromMe) bytes=%s url=%r",
-                                        owner_phone,
-                                        total,
-                                        audio_url[:80],
-                                    )
-                                else:
-                                    logger.warning("[%s] Sin audio_url ni media_key_id para bajar audio", owner_phone)
-                                    return None
-
-                                if total < 1024:
-                                    logger.warning("[%s] Audio (fromMe) demasiado chico (%s bytes)", owner_phone, total)
-                                    return None
-                                _inbox_copy_path_to_audio_subdir(tmp_path, owner_phone, file_name)
-                                effective_path = str(tmp_path)
-                                # Normalizar con ffmpeg a WAV para maximizar decodificación.
-                                wav_path = str(tmp_path.with_suffix(".wav"))
-                                if wav_path != effective_path:
-                                    ok = _ffmpeg_convert_to_wav(str(tmp_path), wav_path, owner_phone)
-                                    if ok:
-                                        effective_path = wav_path
-                                # N8N / Whisper local / Gemini (ver `_transcribe_whatsapp_audio`).
-                                return _transcribe_whatsapp_audio(
-                                    effective_path,
-                                    owner_phone,
-                                    used_base64=used_base64,
-                                )
-
-                            transcription = await asyncio.wait_for(
-                                asyncio.to_thread(_download_and_transcribe),
-                                timeout=120,
+                            await _handle_whatsapp_voice_message(
+                                owner_jid,
+                                owner_phone,
+                                media_key_id_for_download,
+                                audio_url,
+                                file_name,
+                                reply_quote,
                             )
-                            if transcription and _looks_like_valid_transcription(transcription):
-                                logger.info("[%s] Audio transcripto. head=%r", owner_phone, transcription[:120])
-                                await asyncio.to_thread(
-                                    lambda: _process_message(
-                                        transcription,
-                                        owner_phone,
-                                        owner_jid,
-                                        reply_quote=reply_quote,
-                                    ),
-                                )
-                            else:
-                                logger.warning(
-                                    "[%s] Transcripción inválida o vacía. head=%r",
-                                    owner_phone,
-                                    (transcription or "")[:120],
-                                )
-                                await asyncio.to_thread(
-                                    lambda: _send(
-                                        owner_jid,
-                                        "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
-                                        reply_quote=reply_quote,
-                                    ),
-                                )
                         finally:
                             _voice_busy.discard(user_key)
                     return {"ok": True}
@@ -4644,107 +4897,14 @@ async def webhook(request: Request):
             )
 
             try:
-                # Descargar y transcribir en thread (no bloquear).
-                def _download_and_transcribe() -> str | None:
-                    tmp_dir = BASE_DIR / "audio"
-                    tmp_dir.mkdir(exist_ok=True, parents=True)
-                    # Evitar colisiones con múltiples mensajes.
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    suffix = ""
-                    try:
-                        suffix = Path(file_name).suffix.lower()
-                    except Exception:
-                        suffix = ""
-                    if not suffix:
-                        suffix = ".ogg"
-                    if suffix.lower() not in (".ogg", ".oga", ".mp3", ".wav", ".m4a"):
-                        suffix = ".ogg"
-                    tmp_path = tmp_dir / f"wa_voice_{phone}_{ts}{suffix}"
-                    # 1) Preferimos Evolution base64 (decodificable). 2) Si falla, fallback a GET directo.
-                    audio_bytes = _evolution_download_media_base64(media_key_id_for_download, phone=phone)
-                    used_base64 = bool(audio_bytes)
-                    total = 0
-                    if audio_bytes:
-                        with open(tmp_path, "wb") as f:
-                            f.write(audio_bytes)
-                        total = len(audio_bytes)
-                        logger.info("[%s] Descargado audio via base64 bytes=%s", phone, total)
-                    elif audio_url:
-                        headers = {}
-                        if EVOLUTION_API_KEY:
-                            headers["apikey"] = EVOLUTION_API_KEY
-                        with httpx.Client(
-                            follow_redirects=True,
-                            timeout=httpx.Timeout(120.0, connect=20.0, read=120.0),
-                        ) as client:
-                            with client.stream("GET", audio_url, headers=headers) as r:
-                                r.raise_for_status()
-                                logger.info(
-                                    "[%s] Audio GET headers content-type=%r content-length=%r",
-                                    phone,
-                                    r.headers.get("content-type"),
-                                    r.headers.get("content-length"),
-                                )
-                                with open(tmp_path, "wb") as f:
-                                    for chunk in r.iter_bytes():
-                                        if chunk:
-                                            f.write(chunk)
-                                            total += len(chunk)
-                        logger.info(
-                            "[%s] Descargado audio bytes=%s url=%r",
-                            phone,
-                            total,
-                            audio_url[:80],
-                        )
-                    else:
-                        logger.warning("[%s] Sin audio_url ni media_key_id para bajar audio", phone)
-                        return None
-
-                    if total < 1024:
-                        logger.warning("[%s] Audio demasiado chico (%s bytes)", phone, total)
-                        return None
-
-                    _inbox_copy_path_to_audio_subdir(tmp_path, phone, file_name)
-                    effective_path = str(tmp_path)
-                    wav_path = str(tmp_path.with_suffix(".wav"))
-                    if wav_path != effective_path:
-                        ok = _ffmpeg_convert_to_wav(str(tmp_path), wav_path, phone)
-                        if ok:
-                            effective_path = wav_path
-
-                    return _transcribe_whatsapp_audio(
-                        effective_path,
-                        phone,
-                        used_base64=used_base64,
-                    )
-
-                transcription = await asyncio.wait_for(
-                    asyncio.to_thread(_download_and_transcribe),
-                    timeout=120,
+                await _handle_whatsapp_voice_message(
+                    jid,
+                    phone,
+                    media_key_id_for_download,
+                    audio_url,
+                    file_name,
+                    reply_quote,
                 )
-                if transcription and _looks_like_valid_transcription(transcription):
-                    logger.info("[%s] Audio transcripto. head=%r", phone, transcription[:120])
-                    await asyncio.to_thread(
-                        lambda: _process_message(
-                            transcription,
-                            phone,
-                            jid,
-                            reply_quote=reply_quote,
-                        ),
-                    )
-                else:
-                    logger.warning(
-                        "[%s] Transcripción inválida o vacía. head=%r",
-                        phone,
-                        (transcription or "")[:120],
-                    )
-                    await asyncio.to_thread(
-                        lambda: _send(
-                            jid,
-                            "❌ No pude transcribir el audio. Probá enviarlo de nuevo (más corto o con mejor señal).",
-                            reply_quote=reply_quote,
-                        ),
-                    )
             finally:
                 _voice_busy.discard(user_key)
             return {"ok": True}

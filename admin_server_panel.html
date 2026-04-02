@@ -321,6 +321,70 @@
         font-size: 0.9rem;
         line-height: 1.5;
       }
+      .btn-cleanup {
+        margin-top: 12px;
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 107, 107, 0.55);
+        background: rgba(255, 107, 107, 0.12);
+        color: var(--danger);
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .btn-cleanup:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.65);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+        z-index: 200;
+      }
+      .modal-overlay.d-none {
+        display: none !important;
+      }
+      .modal-content {
+        width: 100%;
+        max-width: 560px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 16px;
+      }
+      .modal-title {
+        font-weight: 800;
+        font-size: 1rem;
+        margin-bottom: 10px;
+      }
+      .cleanup-result {
+        background: #0d1117;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        max-height: 60vh;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #c9d1d9;
+        margin: 0;
+      }
+      .btn-close {
+        width: 100%;
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 700;
+      }
       nav.bottom-nav {
         position: fixed;
         bottom: 0;
@@ -493,6 +557,25 @@
             </div>
             <div class="param-val mono" id="pTherm">—</div>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">LIMPIEZA RESIDUAL</div>
+          <p class="placeholder" style="margin: 0 0 8px; font-size: 0.82rem">
+            Borra temporales y medios antiguos para liberar disco (sin tocar datos recientes).
+          </p>
+          <button type="button" id="btnCleanup" class="btn-cleanup">Limpiar ahora</button>
+          <p class="mono" style="font-size: 0.65rem; color: var(--muted); margin: 8px 0 0; line-height: 1.35">
+            Usa default: `audio=1d`, `voice_tmp=2d`, `wa_media=30d` (configurable desde el backend).
+          </p>
+        </div>
+      </div>
+
+      <div id="cleanupModal" class="modal-overlay d-none" aria-hidden="true">
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="cleanupModalTitle">
+          <div class="modal-title" id="cleanupModalTitle">Resultado de limpieza</div>
+          <pre id="cleanupResult" class="cleanup-result mono">—</pre>
+          <button type="button" id="btnCloseCleanup" class="btn-close">Cerrar</button>
         </div>
       </div>
 
@@ -772,6 +855,97 @@
         scheduleRefresh();
       });
       document.getElementById("refreshSec").addEventListener("change", scheduleRefresh);
+
+      function openCleanupModal(text) {
+        const modal = document.getElementById("cleanupModal");
+        const pre = document.getElementById("cleanupResult");
+        pre.textContent = text || "—";
+        modal.classList.remove("d-none");
+        modal.setAttribute("aria-hidden", "false");
+      }
+
+      function closeCleanupModal() {
+        const modal = document.getElementById("cleanupModal");
+        modal.classList.add("d-none");
+        modal.setAttribute("aria-hidden", "true");
+      }
+
+      document.getElementById("btnCloseCleanup").addEventListener("click", function () {
+        closeCleanupModal();
+      });
+
+      document.getElementById("cleanupModal").addEventListener("click", function (e) {
+        if (e && e.target && e.target.id === "cleanupModal") closeCleanupModal();
+      });
+
+      async function doCleanupNow() {
+        const t = token();
+        if (!t) {
+          showErr("Ingresá el token de admin.");
+          return;
+        }
+        const btn = document.getElementById("btnCleanup");
+        btn.disabled = true;
+        showErr("");
+        openCleanupModal("Enviando solicitud…");
+        try {
+          const res = await fetch("/admin/server/api/cleanup", {
+            method: "POST",
+            headers: Object.assign({}, authHeaders(), { "Content-Type": "application/json" }),
+            body: JSON.stringify({}),
+            credentials: "same-origin",
+          });
+          const j = await res.json().catch(() => null);
+          if (!res.ok || !j || !j.ok) {
+            const detail = (j && j.detail) ? String(j.detail) : ("Error HTTP " + res.status);
+            openCleanupModal("Error: " + detail);
+            showErr(detail);
+            return;
+          }
+          let lines = [];
+          lines.push("OK");
+          lines.push("");
+          lines.push("Total borrado: " + (j.total_deleted_files || 0) + " archivos");
+          lines.push("Espacio liberado: " + fmtBytes(j.total_freed_bytes || 0));
+          if (j.policies) {
+            lines.push("");
+            lines.push(
+              "Políticas: audio=" + (j.policies.audio_days || 0) + "d" +
+                ", voice_tmp=" + (j.policies.voice_days || 0) + "d" +
+                ", wa_media=" + (j.policies.wa_media_days || 0) + "d"
+            );
+          }
+          if (Array.isArray(j.results) && j.results.length) {
+            lines.push("");
+            j.results.forEach(function (r) {
+              lines.push(
+                "• " +
+                  (r.dir || "") +
+                  ": " +
+                  (r.deleted_files || 0) +
+                  " archivos" +
+                  ", " +
+                  fmtBytes(r.freed_bytes || 0) +
+                  " (errores: " +
+                  (r.errors || 0) +
+                  ")"
+              );
+            });
+          }
+          openCleanupModal(lines.join("\n"));
+          loadSnapshot();
+          scheduleRefresh();
+        } catch (e) {
+          const msg = (e && e.message) ? e.message : String(e);
+          openCleanupModal("Error de red: " + msg);
+          showErr("Error de red");
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      const btnCleanup = document.getElementById("btnCleanup");
+      if (btnCleanup) btnCleanup.addEventListener("click", doCleanupNow);
 
       document.getElementById("tok").value = localStorage.getItem(LS) || "";
       loadSnapshot();

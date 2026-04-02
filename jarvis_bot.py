@@ -261,15 +261,22 @@ def ask_gemini(user_text: str, context_memory: str | None = None) -> str:
         )
 
     client_gemini = genai.Client(api_key=GEMINI_API_KEY)
-    # Algunos modelos históricos pueden devolver 404 para nuevas cuentas.
-    # Probamos el modelo configurado y, si falla, intentamos alternativas.
-    primary = os.getenv("GEMINI_TEXT_MODEL", "").strip() or "gemini-1.5-flash"
-    fallbacks = [
+    # Algunos modelos históricos devuelven 404 en cuentas nuevas; priorizamos los que suelen existir.
+    primary = os.getenv("GEMINI_TEXT_MODEL", "").strip() or "gemini-2.5-flash"
+    fallbacks_raw = [
         primary,
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
         "gemini-1.5-flash-002",
         "gemini-1.5-pro",
-        "gemini-2.5-flash",
     ]
+    seen: set[str] = set()
+    fallbacks = []
+    for m in fallbacks_raw:
+        if m and m not in seen:
+            seen.add(m)
+            fallbacks.append(m)
 
     last_error = None
     for model_name in fallbacks:
@@ -309,7 +316,21 @@ async def get_ai_response(user_text: str, context_memory: str | None = None) -> 
     Async para no bloquear cuando se usa OpenClaw (SDK async) o backends síncronos.
     """
     if _has_gemini_text:
-        return await asyncio.to_thread(ask_gemini, user_text, context_memory)
+        timeout_sec = float(os.getenv("GEMINI_REQUEST_TIMEOUT_SEC", "120"))
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(ask_gemini, user_text, context_memory),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Gemini: timeout tras %ss (GEMINI_REQUEST_TIMEOUT_SEC). El usuario quedó en «pensando…».",
+                timeout_sec,
+            )
+            return (
+                f"(Error: la IA tardó más de {int(timeout_sec)}s y se canceló el pedido. "
+                "Reintentá; si persiste, revisá red o aumentá GEMINI_REQUEST_TIMEOUT_SEC en el servidor.)"
+            )
 
     if _openclaw_configured():
         try:
@@ -987,12 +1008,12 @@ async def cmd_buscar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_cambiargemini(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Alterna entre voz con Gemini Live y el flujo normal (transcripción + respuesta con Gemini + TTS)."""
+    """Alterna entre voz con Gemini Live (por defecto) y transcripción + respuesta en texto/TTS."""
     if not is_authorized(update):
         await update.message.reply_text("⛔ chat no autorizado")
         return
     ud = context.user_data or {}
-    prev = ud.get(USE_GEMINI_VOICE_KEY, False)
+    prev = ud.get(USE_GEMINI_VOICE_KEY, True)
     ud[USE_GEMINI_VOICE_KEY] = not prev
     if ud[USE_GEMINI_VOICE_KEY]:
         if not GEMINI_API_KEY:
@@ -1002,15 +1023,14 @@ async def cmd_cambiargemini(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
         await update.message.reply_text(
-            "✅ Cambiaste a Gemini para la voz.\n\n"
-            "A partir de ahora, cuando envíes un mensaje de voz, te responderé con la voz de Gemini (Live API). "
-            "Para volver al modo normal, escribí /cambiargemini de nuevo."
+            "✅ Activaste respuesta en voz con Gemini Live.\n\n"
+            "Cuando envíes un mensaje de voz, te responderé con la voz de Gemini. "
+            "Para usar solo transcripción + texto (sin voz directa de Gemini), escribí /cambiargemini de nuevo."
         )
     else:
         await update.message.reply_text(
-            "✅ Volviste al modo normal (transcripción + Gemini + TTS).\n\n"
-            "Los mensajes de voz se transcriben y Gemini responde; si pedís audio, se genera con TTS. "
-            "Para usar de nuevo la voz de Gemini, escribí /cambiargemini o «cambiar a Gemini»."
+            "✅ Modo transcripción: los audios se pasan a texto, Gemini responde por chat y el audio saliente usa TTS.\n\n"
+            "Para volver a la voz directa de Gemini Live, escribí /cambiargemini o «cambiar a Gemini»."
         )
 
 
@@ -1774,9 +1794,21 @@ async def _process_user_message(
     # Jarvis Cripto (/cripto o mensaje «cripto …»)
     # =========================
     from crypto.commands import try_handle_crypto_command
+    from crypto.formatter import format_price_quote
+    from crypto.nl_price_intent import detect_crypto_price_intent
 
     uid_msg = str(update.effective_chat.id)
     crypto_out = try_handle_crypto_command(text, uid_msg, _get_crypto_service())
+    if crypto_out is None:
+        sym_nl = detect_crypto_price_intent(text)
+        if sym_nl:
+            q, err = _get_crypto_service().get_price_quote_object(uid_msg, sym_nl)
+            if err:
+                await update.message.reply_text(err)
+                append_log("user", text.strip())
+                append_log("assistant", err[:1500])
+                return
+            crypto_out = format_price_quote(q)
     if crypto_out is not None:
         await _reply_crypto_message(update, crypto_out, uid_msg)
         append_log("user", text.strip())
@@ -1827,11 +1859,14 @@ async def _process_user_message(
         append_log("user", text.strip())
         append_log("assistant", "Usuario activó voz con Gemini.")
         return
-    if re.search(r"volver\s+a\s+claude|cambiar(s)?\s+a\s+claude|desactivar\s+gemini\s+voz", t_lower):
+    if re.search(
+        r"volver\s+a\s+(transcripci[oó]n|modo\s+normal)|desactivar\s+gemini\s+voz|modo\s+transcripci[oó]n",
+        t_lower,
+    ) or re.search(r"volver\s+a\s+claude|cambiar(s)?\s+a\s+claude", t_lower):
         context.user_data[USE_GEMINI_VOICE_KEY] = False
-        await update.message.reply_text("✅ Volviste al modo normal (transcripción + Gemini + TTS).")
+        await update.message.reply_text("✅ Modo transcripción: sin voz directa de Gemini Live en los audios.")
         append_log("user", text.strip())
-        append_log("assistant", "Usuario volvió al modo normal para voz.")
+        append_log("assistant", "Usuario desactivó voz Gemini Live (transcripción).")
         return
 
     # =========================
@@ -2025,7 +2060,7 @@ async def _process_user_message(
                 await update.message.reply_text(f"❌ Error subiendo a Drive: {e}")
             if rest:
                 await update.message.reply_text(strip_markdown_display_symbols(rest)[:4000])
-        return
+            return
 
         if response.startswith("NOTA:"):
             note_text = response.replace("NOTA:", "", 1).strip()
@@ -2352,9 +2387,9 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ud = context.user_data or {}
 
         # =========================
-        # Flujo Gemini Live (voz → voz) si el usuario activó "cambiar a Gemini"
+        # Flujo Gemini Live (voz → voz) por defecto si hay GEMINI_API_KEY (desactivar con /cambiargemini)
         # =========================
-        if ud.get(USE_GEMINI_VOICE_KEY) and GEMINI_API_KEY:
+        if ud.get(USE_GEMINI_VOICE_KEY, True) and GEMINI_API_KEY:
             await msg.reply_text("🎤 Respondiendo con Gemini...")
             try:
                 tg_file = await context.bot.get_file(file_id)
@@ -2376,16 +2411,16 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             append_log("user", "(mensaje de voz)", entry_type="voz")
                             append_log("sistema", "Respuesta de voz con Gemini Live", entry_type="voz")
                         else:
-                            await msg.reply_text("❌ No pude convertir la respuesta de Gemini a audio. Probá de nuevo o usá /cambiargemini para volver a Claude.")
+                            await msg.reply_text("❌ No pude convertir la respuesta de Gemini a audio. Probá de nuevo o /cambiargemini para modo transcripción.")
                     else:
-                        await msg.reply_text("❌ Gemini no devolvió audio. Probá de nuevo o usá /cambiargemini para volver a Claude.")
+                        await msg.reply_text("❌ Gemini no devolvió audio. Probá de nuevo o /cambiargemini para modo transcripción.")
                 else:
-                    await msg.reply_text("❌ No pude convertir tu audio (¿ffmpeg instalado?). Usá /cambiargemini para volver a Claude y transcribir.")
+                    await msg.reply_text("❌ No pude convertir tu audio (¿ffmpeg instalado?). /cambiargemini para transcribir en su lugar.")
             except asyncio.TimeoutError:
-                await msg.reply_text("⏱ Gemini tardó demasiado. Probá con un mensaje más corto o /cambiargemini para volver a Claude.")
+                await msg.reply_text("⏱ Gemini tardó demasiado. Probá con un mensaje más corto o /cambiargemini para modo transcripción.")
             except Exception as e:
                 logger.exception("Error Gemini Live voz: %s", e)
-                await msg.reply_text(f"❌ Error con Gemini voz: {e}. Probá /cambiargemini para volver a Claude.")
+                await msg.reply_text(f"❌ Error con Gemini voz: {e}. Probá /cambiargemini para modo transcripción.")
             finally:
                 _voice_busy.discard(user_id)
                 if audio_path and audio_path.exists():

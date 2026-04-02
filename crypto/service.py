@@ -14,7 +14,7 @@ from crypto.formatter import (
     format_top_list,
 )
 from crypto.interfaces import IMarketDataProvider, IQueryHistoryStore, ISimulatedPortfolioStore, ITradingProvider
-from crypto.models import PreparedTrade, QueryHistoryEntry, QuoteResult, TradeExecutionResult
+from crypto.models import PreparedTrade, PriceQuote, QueryHistoryEntry, QuoteResult, TradeExecutionResult
 from crypto.storage import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -61,19 +61,29 @@ class CryptoService:
     def get_wallet(self, user_id: str) -> str | None:
         return self._user_wallet.get(user_id)
 
-    def price_for_user(self, user_id: str, symbol: str) -> str:
+    def get_price_quote_object(self, user_id: str, symbol: str) -> tuple[PriceQuote | None, str | None]:
+        """
+        Obtiene la cotización (CMC) o (None, mensaje de error).
+        Usado por el chat web (tarjeta) y por ``price_for_user``.
+        """
         sym = symbol.strip().upper()
         if not sym:
-            return "❌ Indicá un símbolo, ej: /cripto precio SOL"
+            return None, "❌ Indicá un símbolo, ej: /cripto precio SOL"
         try:
             quotes = self._market.quotes_latest([sym])
         except Exception as e:
             logger.warning("CMC quotes error: %s", e)
-            return f"❌ No se pudo obtener precio: {e}"
+            return None, f"❌ No se pudo obtener precio: {e}"
         q = quotes.get(sym)
         if not q:
-            return f"❌ Símbolo no encontrado en CMC: {sym}"
+            return None, f"❌ Símbolo no encontrado en CMC: {sym}"
         self._log(user_id, "precio", sym)
+        return q, None
+
+    def price_for_user(self, user_id: str, symbol: str) -> str:
+        q, err = self.get_price_quote_object(user_id, symbol)
+        if err:
+            return err
         return format_price_quote(q)
 
     def top_for_user(self, user_id: str, limit: int) -> str:

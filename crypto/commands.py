@@ -18,6 +18,34 @@ def _norm_cmd(text: str) -> str:
     return t
 
 
+def sanitize_crypto_symbol_token(raw: str) -> str:
+    """
+    CoinMarketCap exige símbolos alfanuméricos; al copiar desde Markdown a veces
+    queda un backtick u otro carácter (p. ej. SOL`) y la API devuelve 400.
+    """
+    if not raw:
+        return ""
+    s = raw.strip()
+    s = re.sub(r'[`´\'"\u2018\u2019\u201c\u201d]+', "", s)
+    s = re.sub(r"[^A-Za-z0-9]", "", s)
+    return s.upper()
+
+
+def web_price_command_symbol(text: str) -> str | None:
+    """
+    Si el mensaje es explícitamente «/cripto precio SYM» (o «cripto precio SYM»), devuelve SYM.
+    Usado por el chat web para mostrar tarjeta sin duplicar lógica.
+    """
+    raw = _norm_cmd(text)
+    if not raw.lower().startswith("/cripto"):
+        return None
+    parts = raw[len("/cripto") :].strip().split()
+    if len(parts) >= 2 and parts[0].lower() == "precio":
+        sym = sanitize_crypto_symbol_token(parts[1])
+        return sym if sym else None
+    return None
+
+
 def _decimal(s: str) -> Decimal:
     try:
         return Decimal(s.strip().replace(",", "."))
@@ -44,7 +72,10 @@ def try_handle_crypto_command(text: str, user_id: str, service: CryptoService) -
         return help_text()
 
     if head == "precio" and len(parts) >= 2:
-        return service.price_for_user(user_id, parts[1])
+        sym = sanitize_crypto_symbol_token(parts[1])
+        if not sym:
+            return "❌ Símbolo inválido (solo letras y números, ej: SOL)."
+        return service.price_for_user(user_id, sym)
 
     if head == "top":
         n = 10

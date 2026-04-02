@@ -233,23 +233,91 @@
       .btn-icon.has-file {
         color: var(--accent);
       }
-      .btn-send {
+      .btn-live {
         flex-shrink: 0;
-        min-width: 3rem;
+        width: 2.75rem;
         border: none;
         border-left: 1px solid var(--line);
         background: transparent;
-        color: var(--accent);
-        font-size: 1.15rem;
+        color: #6ee7b7;
         cursor: pointer;
-        padding: 0 1rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 0.15s, background 0.15s;
       }
-      .btn-send:hover:not(:disabled) {
-        background: rgba(255, 255, 255, 0.04);
+      .btn-live:hover {
+        color: #a7f3d0;
+        background: rgba(110, 231, 183, 0.08);
       }
-      .btn-send:disabled {
+      .btn-live.active {
+        color: #f87171;
+        background: rgba(248, 113, 113, 0.12);
+        animation: mic-pulse 1.2s ease-in-out infinite;
+      }
+      .btn-live:disabled {
         opacity: 0.35;
         cursor: not-allowed;
+      }
+      .btn-mic {
+        flex-shrink: 0;
+        width: 2.75rem;
+        border: none;
+        border-left: 1px solid var(--line);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 0.15s, background 0.15s;
+      }
+      .btn-mic:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .btn-mic.recording {
+        color: #f87171;
+        background: rgba(248, 113, 113, 0.12);
+        animation: mic-pulse 1s ease-in-out infinite;
+      }
+      .btn-mic:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      @keyframes mic-pulse {
+        50% {
+          opacity: 0.85;
+        }
+      }
+      .live-call-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.45rem;
+        padding: 0.5rem 0.65rem;
+        border-radius: 10px;
+        border: 1px solid rgba(110, 231, 183, 0.35);
+        background: rgba(16, 185, 129, 0.08);
+        font-size: 0.8rem;
+      }
+      .live-call-bar.d-none {
+        display: none !important;
+      }
+      .live-call-bar button {
+        flex-shrink: 0;
+        padding: 0.35rem 0.65rem;
+        border-radius: 8px;
+        border: 1px solid rgba(248, 113, 113, 0.45);
+        background: rgba(248, 113, 113, 0.12);
+        color: #fecaca;
+        cursor: pointer;
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+      .live-call-bar button:hover {
+        background: rgba(248, 113, 113, 0.2);
       }
       .visually-hidden {
         position: absolute;
@@ -272,6 +340,70 @@
         color: #e88;
         font-size: 0.8rem;
         margin-top: 0.35rem;
+      }
+      .crypto-card {
+        border-radius: 14px;
+        padding: 0.85rem 1rem;
+        margin: 0.35rem 0 0 0;
+        max-width: 22rem;
+        background: linear-gradient(
+          135deg,
+          var(--g1, #2563eb) 0%,
+          var(--g2, #7c3aed) 100%
+        );
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+      .crypto-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.35rem;
+      }
+      .crypto-card-name {
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.88);
+      }
+      .crypto-card-sym {
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: rgba(255, 255, 255, 0.95);
+        background: rgba(0, 0, 0, 0.2);
+        padding: 0.15rem 0.45rem;
+        border-radius: 6px;
+      }
+      .crypto-card-price {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #fff;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+      }
+      .crypto-card-meta {
+        margin-top: 0.45rem;
+        font-size: 0.78rem;
+        color: rgba(255, 255, 255, 0.82);
+        line-height: 1.45;
+      }
+      .crypto-chip {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 600;
+        padding: 0.12rem 0.4rem;
+        border-radius: 999px;
+        margin-top: 0.35rem;
+      }
+      .crypto-chip.up {
+        background: rgba(16, 185, 129, 0.35);
+        color: #bbf7d0;
+      }
+      .crypto-chip.down {
+        background: rgba(248, 113, 113, 0.35);
+        color: #fecaca;
       }
     </style>
   </head>
@@ -311,7 +443,13 @@
             <div id="messages"></div>
           </div>
           <div class="chat-footer">
-            <p class="attach-hint">Adjuntá una imagen para editarla con la IA (Gemini). PDF/Word: solo imágenes por ahora.</p>
+            <p class="attach-hint">
+              Escribí y pulsá Enter para enviar. Mantené pulsado el micrófono (derecha) para un mensaje corto; el botón verde inicia una «llamada» Gemini Live hasta que colgues. Podés adjuntar imagen para editar con la IA.
+            </p>
+            <div id="liveCallBar" class="live-call-bar d-none" aria-hidden="true">
+              <span id="liveCallStatus">Llamada Gemini Live — hablando…</span>
+              <button type="button" id="btnHangup">Colgar</button>
+            </div>
             <input
               type="file"
               id="fileInput"
@@ -326,7 +464,19 @@
                 </svg>
               </button>
               <textarea id="msgInput" rows="1" placeholder="Escribí un mensaje…"></textarea>
-              <button type="submit" class="btn-send" id="sendBtn" title="Enviar">→</button>
+              <button type="button" class="btn-live" id="btnLive" title="Gemini Live: llamada hasta colgar" aria-label="Llamada Gemini Live">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                </svg>
+              </button>
+              <button type="button" class="btn-mic" id="btnMic" title="Mantener: mensaje de voz corto (Gemini)" aria-label="Micrófono">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              </button>
             </form>
             <p class="err" id="chatErr"></p>
           </div>
@@ -369,12 +519,26 @@
         var btnLogin = document.getElementById("btnLogin");
         var messages = document.getElementById("messages");
         var msgInput = document.getElementById("msgInput");
-        var sendBtn = document.getElementById("sendBtn");
         var authErr = document.getElementById("authErr");
         var chatErr = document.getElementById("chatErr");
         var fileInput = document.getElementById("fileInput");
         var btnAttach = document.getElementById("btnAttach");
         var btnLogout = document.getElementById("btnLogout");
+        var btnMic = document.getElementById("btnMic");
+        var btnLive = document.getElementById("btnLive");
+        var liveCallBar = document.getElementById("liveCallBar");
+        var btnHangup = document.getElementById("btnHangup");
+
+        var voiceStream = null;
+        var voiceRecorder = null;
+        var voiceRecording = false;
+        var voiceCancelStart = false;
+        var liveCallMode = false;
+
+        function setComposerBusy(on) {
+          if (btnMic) btnMic.disabled = !!on;
+          if (btnLive) btnLive.disabled = !!on;
+        }
 
         function scrollChatToBottom() {
           if (chatScroll) {
@@ -415,7 +579,7 @@
           var mediaParts = [];
           parts.forEach(function (p) {
             if (!p || !p.type) return;
-            if (p.type === "text") textParts.push(p);
+            if (p.type === "text" || p.type === "crypto_quote") textParts.push(p);
             else mediaParts.push(p);
           });
           function appendPart(p) {
@@ -424,6 +588,48 @@
               t.style.whiteSpace = "pre-wrap";
               t.textContent = p.text || "";
               d.appendChild(t);
+            } else if (p.type === "crypto_quote") {
+              var card = document.createElement("div");
+              card.className = "crypto-card";
+              if (p.gradient_from && p.gradient_to) {
+                card.style.setProperty("--g1", p.gradient_from);
+                card.style.setProperty("--g2", p.gradient_to);
+              }
+              var head = document.createElement("div");
+              head.className = "crypto-card-head";
+              var nm = document.createElement("div");
+              nm.className = "crypto-card-name";
+              nm.textContent = p.name || "";
+              var sy = document.createElement("div");
+              sy.className = "crypto-card-sym";
+              sy.textContent = p.symbol || "";
+              head.appendChild(nm);
+              head.appendChild(sy);
+              card.appendChild(head);
+              var pr = document.createElement("div");
+              pr.className = "crypto-card-price";
+              pr.textContent = p.price_usd || "";
+              card.appendChild(pr);
+              if (p.has_ars && p.price_ars) {
+                var ars = document.createElement("div");
+                ars.className = "crypto-card-meta";
+                ars.textContent = p.price_ars;
+                card.appendChild(ars);
+              }
+              if (p.change_label) {
+                var ch = document.createElement("span");
+                ch.className = "crypto-chip " + (p.change_up === false ? "down" : "up");
+                ch.textContent = "24h " + p.change_label;
+                card.appendChild(ch);
+              }
+              var meta = document.createElement("div");
+              meta.className = "crypto-card-meta";
+              var bits = [];
+              if (p.rank) bits.push("Rank CMC #" + p.rank);
+              if (p.market_cap_usd) bits.push("Cap. " + p.market_cap_usd);
+              meta.textContent = bits.join(" · ");
+              if (bits.length) card.appendChild(meta);
+              d.appendChild(card);
             } else if (p.type === "image") {
               var img = document.createElement("img");
               img.alt = p.caption || "imagen";
@@ -667,6 +873,265 @@
           return f && f.type && f.type.indexOf("image/") === 0;
         }
 
+        function sendVoiceBlob(blob) {
+          chatErr.textContent = "";
+          var t = normalizeClientToken(localStorage.getItem(LS_TOK) || "");
+          if (!t) {
+            liveCallMode = false;
+            if (liveCallBar) liveCallBar.classList.add("d-none");
+            if (btnLive) btnLive.classList.remove("active");
+            setComposerBusy(false);
+            showAuth();
+            return;
+          }
+          if (!blob || blob.size < 200) {
+            chatErr.textContent = "Grabación demasiado corta.";
+            liveCallMode = false;
+            if (liveCallBar) liveCallBar.classList.add("d-none");
+            if (btnLive) btnLive.classList.remove("active");
+            setComposerBusy(false);
+            return;
+          }
+          setComposerBusy(true);
+          var reader = new FileReader();
+          reader.onloadend = function () {
+            var s = String(reader.result || "");
+            var i = s.indexOf("base64,");
+            var b64 = i >= 0 ? s.slice(i + 7) : null;
+            if (!b64) {
+              chatErr.textContent = "No se pudo leer el audio.";
+              setComposerBusy(false);
+              return;
+            }
+            appendBubble("🎤 (mensaje de voz)", "user");
+            fetch("/api/jarvis-web/voice-live", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                token: t,
+                session_id: sid(),
+                audio_base64: b64,
+                audio_mime: blob.type || "audio/webm",
+              }),
+              credentials: "same-origin",
+            })
+              .then(function (r) {
+                return r.json();
+              })
+              .then(function (j) {
+                if (!j.ok) {
+                  chatErr.textContent = (j.detail && String(j.detail)) || "Error en voz Gemini";
+                  if (j.detail && String(j.detail).indexOf("Token") >= 0) {
+                    localStorage.removeItem(LS_TOK);
+                    showAuth();
+                  }
+                  return;
+                }
+                var wrap = document.createElement("div");
+                wrap.className = "bubble bot";
+                var lab = document.createElement("div");
+                lab.style.fontSize = "0.75rem";
+                lab.style.color = "var(--muted)";
+                lab.style.marginBottom = "0.35rem";
+                lab.textContent = "Gemini · respuesta en voz";
+                wrap.appendChild(lab);
+                var aud = document.createElement("audio");
+                aud.controls = true;
+                aud.src = "data:" + (j.mime || "audio/mpeg") + ";base64," + (j.audio_base64 || "");
+                wrap.appendChild(aud);
+                messages.appendChild(wrap);
+                scrollChatToBottom();
+              })
+              .catch(function () {
+                chatErr.textContent = "Error de red al enviar voz.";
+              })
+              .finally(function () {
+                setComposerBusy(false);
+              });
+          };
+          reader.onerror = function () {
+            chatErr.textContent = "No se pudo leer el audio.";
+            setComposerBusy(false);
+          };
+          reader.readAsDataURL(blob);
+        }
+
+        function startVoiceCapture() {
+          chatErr.textContent = "";
+          voiceCancelStart = false;
+          if (liveCallMode) {
+            chatErr.textContent = "Colgá la llamada primero.";
+            return;
+          }
+          var t = normalizeClientToken(localStorage.getItem(LS_TOK) || "");
+          if (!t) {
+            showAuth();
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            chatErr.textContent = "Tu navegador no permite acceso al micrófono.";
+            return;
+          }
+          if (!window.MediaRecorder) {
+            chatErr.textContent = "MediaRecorder no disponible en este navegador.";
+            return;
+          }
+          if (voiceRecording) return;
+          navigator.mediaDevices
+            .getUserMedia({ audio: true })
+            .then(function (stream) {
+              if (voiceCancelStart) {
+                stream.getTracks().forEach(function (tr) {
+                  tr.stop();
+                });
+                return;
+              }
+              voiceStream = stream;
+              var mime = "audio/webm;codecs=opus";
+              if (!MediaRecorder.isTypeSupported(mime)) mime = "audio/webm";
+              if (!MediaRecorder.isTypeSupported(mime)) mime = "";
+              var rec = mime
+                ? new MediaRecorder(stream, { mimeType: mime })
+                : new MediaRecorder(stream);
+              voiceRecorder = rec;
+              var chunks = [];
+              rec.ondataavailable = function (e) {
+                if (e.data && e.data.size) chunks.push(e.data);
+              };
+              rec.onstop = function () {
+                var blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+                voiceRecording = false;
+                voiceRecorder = null;
+                if (voiceStream) {
+                  voiceStream.getTracks().forEach(function (tr) {
+                    tr.stop();
+                  });
+                  voiceStream = null;
+                }
+                if (btnMic) btnMic.classList.remove("recording");
+                setComposerBusy(false);
+                sendVoiceBlob(blob);
+              };
+              rec.start();
+              voiceRecording = true;
+              if (btnMic) btnMic.classList.add("recording");
+              setComposerBusy(true);
+            })
+            .catch(function (e) {
+              chatErr.textContent = "Micrófono: " + (e && e.message ? e.message : "permiso denegado");
+            });
+        }
+
+        function endVoiceCapture() {
+          voiceCancelStart = true;
+          if (!voiceRecorder || voiceRecorder.state !== "recording") return;
+          try {
+            voiceRecorder.stop();
+          } catch (err) {}
+        }
+
+        function startLiveCallCapture() {
+          chatErr.textContent = "";
+          var t = normalizeClientToken(localStorage.getItem(LS_TOK) || "");
+          if (!t) {
+            showAuth();
+            return;
+          }
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            chatErr.textContent = "Tu navegador no permite acceso al micrófono.";
+            return;
+          }
+          if (!window.MediaRecorder) {
+            chatErr.textContent = "MediaRecorder no disponible en este navegador.";
+            return;
+          }
+          if (voiceRecording || liveCallMode) return;
+          liveCallMode = true;
+          if (liveCallBar) {
+            liveCallBar.classList.remove("d-none");
+            liveCallBar.setAttribute("aria-hidden", "false");
+          }
+          if (btnLive) btnLive.classList.add("active");
+          setComposerBusy(true);
+          navigator.mediaDevices
+            .getUserMedia({ audio: true })
+            .then(function (stream) {
+              voiceStream = stream;
+              var mime = "audio/webm;codecs=opus";
+              if (!MediaRecorder.isTypeSupported(mime)) mime = "audio/webm";
+              if (!MediaRecorder.isTypeSupported(mime)) mime = "";
+              var rec = mime
+                ? new MediaRecorder(stream, { mimeType: mime })
+                : new MediaRecorder(stream);
+              voiceRecorder = rec;
+              var chunks = [];
+              rec.ondataavailable = function (e) {
+                if (e.data && e.data.size) chunks.push(e.data);
+              };
+              rec.onstop = function () {
+                var blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+                voiceRecording = false;
+                voiceRecorder = null;
+                if (voiceStream) {
+                  voiceStream.getTracks().forEach(function (tr) {
+                    tr.stop();
+                  });
+                  voiceStream = null;
+                }
+                liveCallMode = false;
+                if (liveCallBar) {
+                  liveCallBar.classList.add("d-none");
+                  liveCallBar.setAttribute("aria-hidden", "true");
+                }
+                if (btnLive) btnLive.classList.remove("active");
+                sendVoiceBlob(blob);
+              };
+              rec.start();
+              voiceRecording = true;
+            })
+            .catch(function (e) {
+              liveCallMode = false;
+              if (liveCallBar) liveCallBar.classList.add("d-none");
+              if (btnLive) btnLive.classList.remove("active");
+              setComposerBusy(false);
+              chatErr.textContent = "Micrófono: " + (e && e.message ? e.message : "permiso denegado");
+            });
+        }
+
+        function endLiveCallCapture() {
+          if (!liveCallMode || !voiceRecorder || voiceRecorder.state !== "recording") return;
+          try {
+            voiceRecorder.stop();
+          } catch (err) {}
+        }
+
+        if (btnMic) {
+          btnMic.addEventListener("pointerdown", function (e) {
+            e.preventDefault();
+            voiceCancelStart = false;
+            startVoiceCapture();
+          });
+          btnMic.addEventListener("contextmenu", function (e) {
+            e.preventDefault();
+          });
+        }
+        if (btnLive) {
+          btnLive.addEventListener("click", function () {
+            startLiveCallCapture();
+          });
+        }
+        if (btnHangup) {
+          btnHangup.addEventListener("click", function () {
+            endLiveCallCapture();
+          });
+        }
+        document.addEventListener("pointerup", function () {
+          if (!liveCallMode) endVoiceCapture();
+        });
+        document.addEventListener("pointercancel", function () {
+          endVoiceCapture();
+        });
+
         function sendMsg() {
           chatErr.textContent = "";
           var t = normalizeClientToken(localStorage.getItem(LS_TOK) || "");
@@ -690,7 +1155,7 @@
             appendBubble(userLine, "user");
           }
           msgInput.value = "";
-          sendBtn.disabled = true;
+          setComposerBusy(true);
 
           function doPost(b64, mime) {
             var payload = {
@@ -747,7 +1212,7 @@
                 chatErr.textContent = "Sin respuesta del servidor.";
               })
               .finally(function () {
-                sendBtn.disabled = false;
+                setComposerBusy(false);
                 if (fileInput) {
                   fileInput.value = "";
                   syncAttachState();
@@ -759,7 +1224,7 @@
             fileToBase64(f, function (b64) {
               if (!b64) {
                 chatErr.textContent = "No se pudo leer el archivo.";
-                sendBtn.disabled = false;
+                setComposerBusy(false);
                 return;
               }
               doPost(b64, f.type || "image/jpeg");

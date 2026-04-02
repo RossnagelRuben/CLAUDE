@@ -141,6 +141,10 @@ def _parts_to_plain_reply(parts: list[dict[str, Any]]) -> str:
             lines.append("[Audio]")
         elif t == "file":
             lines.append(f"[Archivo: {p.get('filename', 'adjunto')}]")
+        elif t == "crypto_quote":
+            sym = p.get("symbol") or "?"
+            usd = p.get("price_usd") or ""
+            lines.append(f"[Cripto {sym}] {usd}")
     out = "\n\n".join(x for x in lines if x)
     return out.strip() or "(sin texto)"
 
@@ -331,6 +335,15 @@ class WebChatBody(BaseModel):
     verify_only: bool = Field(default=False, description="Si true, solo comprueba el token y no llama a la IA")
 
 
+class WebVoiceBody(BaseModel):
+    """Audio grabado en el navegador (WebM/Opus típico) → respuesta MP3 vía Gemini Live."""
+
+    token: str = Field(min_length=1)
+    session_id: str = Field(default="", max_length=128)
+    audio_base64: str = Field(min_length=1)
+    audio_mime: str = Field(default="audio/webm", max_length=128)
+
+
 class WebVerifyBody(BaseModel):
     token: str = Field(min_length=1)
 
@@ -409,5 +422,51 @@ def build_router() -> APIRouter:
             image_base64=body.image_base64,
             image_mime=body.image_mime or "image/jpeg",
         )
+
+    @router.post("/api/jarvis-web/voice-live")
+    async def jarvis_web_voice_live(request: Request, body: WebVoiceBody) -> dict[str, Any]:
+        """
+        Voz con Gemini Live: el cliente envía un clip (WebM/Opus u otro) y recibe MP3 con la respuesta hablada.
+        Mismo backend que Telegram (/cambiargemini), adaptado al chat web.
+        """
+        if not verify_web_chat_token(body.token):
+            raise HTTPException(status_code=403, detail="Token incorrecto")
+        client = _client_ip(request)
+        try:
+            raw = base64.b64decode(body.audio_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="audio_base64 inválido") from None
+        if len(raw) < 256:
+            raise HTTPException(status_code=400, detail="audio demasiado corto")
+        if len(raw) > 8 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="audio demasiado grande")
+
+        try:
+            from jarvis_web_voice import gemini_live_voice_web_mp3
+        except ImportError as e:
+            logger.exception("jarvis_web_voice import")
+            raise HTTPException(status_code=503, detail=f"Módulo de voz no disponible: {e}") from e
+
+        mp3, err = await gemini_live_voice_web_mp3(raw, body.audio_mime or "audio/webm")
+        sid = (body.session_id or "").strip() or "anon"
+        _append_jsonl(
+            {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": "voice_live",
+                "session_id": sid,
+                "client_ip": client,
+                "ok": err is None,
+                "bytes_in": len(raw),
+                "bytes_out": len(mp3) if mp3 else 0,
+            }
+        )
+        if err:
+            return {"ok": False, "detail": err, "audio_base64": None, "mime": None}
+        return {
+            "ok": True,
+            "audio_base64": base64.b64encode(mp3).decode("ascii"),
+            "mime": "audio/mpeg",
+            "session_id": sid,
+        }
 
     return router

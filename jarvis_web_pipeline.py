@@ -254,6 +254,10 @@ def _assistant_history_text(parts: list[dict[str, Any]]) -> str:
             chunks.append("[Audio]")
         elif t == "file":
             chunks.append(f"[Archivo: {p.get('filename', 'adjunto')}]")
+        elif t == "crypto_quote":
+            sym = p.get("symbol") or "?"
+            usd = p.get("price_usd") or ""
+            chunks.append(f"[Cripto {sym}] {usd}")
     return "\n".join(x for x in chunks if x).strip() or "(respuesta multimedia)"
 
 
@@ -339,13 +343,41 @@ async def _try_confirm_or_cancel_web(
 async def _handle_crypto_web(
     session_id: str, text: str, parts: list[dict[str, Any]]
 ) -> bool:
-    from crypto.commands import try_handle_crypto_command
+    from crypto.commands import try_handle_crypto_command, web_price_command_symbol
+    from crypto.formatter import price_quote_to_web_card
+    from crypto.nl_price_intent import detect_crypto_price_intent
     from jarvis_bot import _get_crypto_service, append_log
 
     uid = _web_uid(session_id)
-    out = try_handle_crypto_command(text, uid, _get_crypto_service())
+    svc = _get_crypto_service()
+
+    # /cripto precio SYM → una sola consulta + tarjeta visual (sin depender de la IA)
+    sym_cmd = web_price_command_symbol(text)
+    if sym_cmd:
+        q, err = svc.get_price_quote_object(uid, sym_cmd)
+        append_log("user", text.strip())
+        if err:
+            parts.append(_part_text(err))
+            append_log("assistant", (err or "")[:1500])
+            return True
+        parts.append(price_quote_to_web_card(q))
+        append_log("assistant", f"{q.name} ({q.symbol}) — cotización web")
+        return True
+
+    out = try_handle_crypto_command(text, uid, svc)
     if out is None:
-        return False
+        sym_nl = detect_crypto_price_intent(text)
+        if sym_nl is None:
+            return False
+        q, err = svc.get_price_quote_object(uid, sym_nl)
+        append_log("user", text.strip())
+        if err:
+            parts.append(_part_text(err))
+            append_log("assistant", (err or "")[:1500])
+            return True
+        parts.append(price_quote_to_web_card(q))
+        append_log("assistant", f"{q.name} ({q.symbol}) — cotización web (NL)")
+        return True
     # Respuesta larga en trozos lógicos para la UI
     chunk = 4096
     for i in range(0, len(out), chunk):
