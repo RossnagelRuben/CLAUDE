@@ -34,34 +34,9 @@
   <body class="text-light">
     <div class="container py-4">
       <div class="panel mx-auto">
-        <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
-          <div>
-            <div class="fw-semibold fs-5">Jarvis WhatsApp - Panel de Numeros</div>
-            <div class="text-secondary small">Admin para WHATSAPP_ALLOWED_NUMBERS y WHATSAPP_PHONE_MAP</div>
-          </div>
-          <div class="d-flex align-items-center flex-wrap gap-2">
-            <a
-              id="qrEvolutionLink"
-              href="#evolution-qr-embedded"
-              class="btn btn-sm btn-outline-info"
-              title="Baja a la seccion QR en esta misma pagina. Opcional: QR_WEB_PUBLIC_URL en .env para abrir otra URL."
-            >
-              QR y cerrar sesion (Evolution)
-            </a>
-            <div class="text-secondary small mono">/admin/whatsapp</div>
-          </div>
-        </div>
-
         <div id="app"></div>
 
         <div id="evolution-qr-embedded" class="glass p-4 mt-3">
-          <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
-            <div class="fw-semibold">Evolution — Vincular WhatsApp</div>
-            <span class="text-secondary small">Actualizacion cada 2s</span>
-          </div>
-          <p class="text-secondary small mb-3">
-            Todo desde esta misma pagina: no hace falta otra pestaña ni la terminal. Escané el codigo desde WhatsApp → Dispositivos vinculados.
-          </p>
           <!-- WHATSAPP_DEBUG_LOG_INJECT -->
           <div id="evoQrBox" style="min-height: 220px; display: grid; place-items: center"></div>
           <p id="evoQrStatus" class="small mt-2 text-secondary"></p>
@@ -77,33 +52,6 @@
             autocomplete="off"
             placeholder="Mismo valor que AGENT_SECRET en .env"
           />
-          <label class="form-label text-secondary small mt-2 mb-1" for="evoInstanceName">
-            Opcional — nombre de la instancia en <strong>Evolution</strong> (si no coincide con el .env del servidor)
-          </label>
-          <input
-            type="text"
-            id="evoInstanceName"
-            class="form-control font-monospace"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="ej. jarvis — dejá vacío para usar la del servidor"
-          />
-          <button type="button" class="btn btn-outline-info btn-sm w-100 mt-2" id="evoSessionsBtn">
-            Ver sesiones / instancias en Evolution (cual esta open)
-          </button>
-          <pre
-            id="evoSessionsOut"
-            class="mono small text-info mt-2 mb-0 p-2 rounded"
-            style="
-              display: none;
-              max-height: 220px;
-              overflow: auto;
-              white-space: pre-wrap;
-              word-break: break-word;
-              background: rgba(0, 0, 0, 0.35);
-              border: 1px solid rgba(255, 255, 255, 0.12);
-            "
-          ></pre>
           <button type="button" class="btn btn-danger w-100 mt-2" id="evoLogoutBtn">Cerrar sesion y pedir QR nuevo</button>
           <p id="evoLogoutMsg" class="small mt-2 text-secondary"></p>
           <button type="button" class="btn btn-outline-light btn-sm w-100 mt-2" id="evoDiagBtn">
@@ -122,56 +70,39 @@
               border: 1px solid rgba(255, 255, 255, 0.12);
             "
           ></pre>
-          <div class="form-check form-switch mt-3 mb-2">
-            <input class="form-check-input" type="checkbox" id="evoAutoLogOn" checked />
-            <label class="form-check-label text-secondary small" for="evoAutoLogOn">
-              <strong>Log automático</strong> — se alimenta solo (acciones en esta página + servidor si el bridge está
-              actualizado). Sobrevive recargas en este navegador.
-            </label>
-          </div>
-          <pre
-            id="evoAutoFeedLog"
-            class="mono small text-light mt-1 mb-1 p-2 rounded"
-            style="
-              display: block;
-              max-height: 360px;
-              overflow: auto;
-              white-space: pre-wrap;
-              word-break: break-word;
-              background: rgba(0, 20, 40, 0.55);
-              border: 1px solid rgba(13, 110, 253, 0.35);
-              font-size: 11px;
-            "
-          ></pre>
-          <button type="button" class="btn btn-link btn-sm text-secondary p-0 mt-1" id="evoClearClientLog">
-            Vaciar solo el log del navegador
+          <button type="button" class="btn btn-outline-secondary btn-sm w-100 mt-3" id="evoLogToggle" aria-expanded="false">
+            Mostrar log automático
           </button>
+          <div id="evoLogPanel" class="d-none mt-2">
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="evoAutoLogOn" />
+              <label class="form-check-label text-secondary small" for="evoAutoLogOn">
+                <strong>Log automático</strong> — se alimenta solo (acciones en esta página + servidor si el bridge está
+                actualizado). Sobrevive recargas en este navegador.
+              </label>
+            </div>
+            <pre
+              id="evoAutoFeedLog"
+              class="mono small text-light mt-1 mb-1 p-2 rounded"
+              style="
+                display: block;
+                max-height: 360px;
+                overflow: auto;
+                white-space: pre-wrap;
+                word-break: break-word;
+                background: rgba(0, 20, 40, 0.55);
+                border: 1px solid rgba(13, 110, 253, 0.35);
+                font-size: 11px;
+              "
+            ></pre>
+            <button type="button" class="btn btn-link btn-sm text-secondary p-0 mt-1" id="evoClearClientLog">
+              Vaciar solo el log del navegador
+            </button>
+          </div>
         </div>
       </div>
     </div>
 
-    <script>
-      (function () {
-        var el = document.getElementById("qrEvolutionLink");
-        if (!el) return;
-        var base =
-          typeof window.__QR_WEB_PUBLIC_URL__ === "string" && window.__QR_WEB_PUBLIC_URL__.trim()
-            ? window.__QR_WEB_PUBLIC_URL__.trim()
-            : "";
-        if (base) {
-          el.href = base;
-          el.target = "_blank";
-          el.rel = "noopener noreferrer";
-        } else {
-          el.href = "#evolution-qr-embedded";
-          el.removeAttribute("target");
-          el.addEventListener("click", function (e) {
-            var sec = document.getElementById("evolution-qr-embedded");
-            if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
-          });
-        }
-      })();
-    </script>
     <script>
       (function () {
         var ORIGIN = typeof window !== "undefined" && window.location && window.location.origin ? window.location.origin : "";
@@ -422,72 +353,6 @@
             pushClientLog("diag_manual_err", String(e));
           }
         }
-        async function loadEvolutionSessions(tok) {
-          var out = document.getElementById("evoSessionsOut");
-          if (!out) return;
-          if (!tok) {
-            out.style.display = "block";
-            out.textContent = "Ingresá AGENT_SECRET arriba.";
-            return;
-          }
-          out.style.display = "block";
-          out.textContent = "Consultando Evolution…";
-          var urls = [API + "/evolution-instances", absUrl("/j/instances")];
-          try {
-            var note = "";
-            for (var si = 0; si < urls.length; si++) {
-              var r = await fetch(urls[si], {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ token: tok }),
-                cache: "no-store",
-              });
-              var j = null;
-              try {
-                j = await r.json();
-              } catch (e2) {
-                j = null;
-              }
-              var up = urls[si].split("?")[0].replace(/^https?:\/\/[^/]+/, "");
-              pushClientLog("sessions", up + " HTTP " + r.status);
-              if (r.status === 404) {
-                var rs = await fetch(absUrl("/admin/whatsapp"), {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ wa_op: "evolution-instances", token: tok }),
-                  cache: "no-store",
-                });
-                pushClientLog("sessions_fb", "POST /admin/whatsapp instances HTTP " + rs.status);
-                try {
-                  j = await rs.json();
-                } catch (e2b) {
-                  j = null;
-                }
-                if (j && j.ok) {
-                  out.textContent = JSON.stringify(j, null, 2);
-                  renderAutoFeed();
-                  return;
-                }
-                note = "404 en " + up + ". ";
-                continue;
-              }
-              if (j && j.ok) {
-                out.textContent = JSON.stringify(j, null, 2);
-                renderAutoFeed();
-                return;
-              }
-              if (j) {
-                out.textContent = JSON.stringify(j, null, 2) + "\n(HTTP " + r.status + ")";
-                return;
-              }
-            }
-            out.textContent =
-              note +
-              "No se pudo listar. Comproba en el servidor que Evolution este en marcha y que EVOLUTION_API_URL / KEY en el .env del bridge apunten bien.";
-          } catch (e) {
-            out.textContent = String(e);
-          }
-        }
         async function refreshQr() {
           var box = document.getElementById("evoQrBox");
           var st = document.getElementById("evoQrStatus");
@@ -535,7 +400,7 @@
               return;
             }
             if (msg) msg.textContent = "Procesando…";
-            var inst = ((document.getElementById("evoInstanceName") || {}).value || "").trim();
+            var inst = "";
             var bodyJson = inst ? JSON.stringify({ token: tok, instance: inst }) : JSON.stringify({ token: tok });
             var qInst = inst ? "&instance=" + encodeURIComponent(inst) : "";
             var lastStatus = 0;
@@ -704,11 +569,20 @@
             loadDiagnostics(tok, document.getElementById("evoDiagOut"));
           });
         }
-        var sessBtn = document.getElementById("evoSessionsBtn");
-        if (sessBtn) {
-          sessBtn.addEventListener("click", function () {
-            var tok = ((document.getElementById("evoLogoutTok") || {}).value || "").trim();
-            loadEvolutionSessions(tok);
+        var logToggle = document.getElementById("evoLogToggle");
+        var logPanel = document.getElementById("evoLogPanel");
+        if (logToggle && logPanel) {
+          logToggle.addEventListener("click", function () {
+            var hidden = logPanel.classList.contains("d-none");
+            if (hidden) {
+              logPanel.classList.remove("d-none");
+              logToggle.textContent = "Ocultar log automático";
+              logToggle.setAttribute("aria-expanded", "true");
+            } else {
+              logPanel.classList.add("d-none");
+              logToggle.textContent = "Mostrar log automático";
+              logToggle.setAttribute("aria-expanded", "false");
+            }
           });
         }
         try {
@@ -865,9 +739,6 @@
             <div class="row g-3">
               <div class="col-12 col-lg-6">
                 <div class="fw-semibold mb-2">WHATSAPP_ALLOWED_NUMBERS</div>
-                <div class="text-secondary small mb-3">
-                  Lista de numeros permitidos (se comparan con phone_norm del webhook).
-                </div>
 
                 <div class="d-flex gap-2 mb-3">
                   <input id="addAllowedInput" class="form-control mono" placeholder="ej: 41794157573" />
@@ -881,9 +752,6 @@
 
               <div class="col-12 col-lg-6">
                 <div class="fw-semibold mb-2">WHATSAPP_PHONE_MAP (avanzado)</div>
-                <div class="text-secondary small mb-3">
-                  Mapea phone_norm (entrada) -> numero real (salida) para evitar exists:false en Evolution.
-                </div>
 
                 <div class="d-flex flex-column">
                   ${phoneRows || `<div class="text-secondary small">Sin mapeos.</div>`}
@@ -907,10 +775,6 @@
               <button id="logsBtn" class="btn btn-outline-info" type="button" ${state.loading ? "disabled" : ""}>
                 Ver últimos mensajes
               </button>
-            </div>
-
-            <div class="text-secondary small mt-3">
-              Nota: el bridge usa el .env en runtime; este panel re-carga la configuracion en memoria.
             </div>
 
             <div id="errBox" class="alert alert-danger mt-3 mb-0 d-none"></div>

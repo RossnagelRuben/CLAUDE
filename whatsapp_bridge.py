@@ -4233,14 +4233,7 @@ def admin_whatsapp_page(request: Request):
         # Inyecta URL del QR (qr_server); si no hay env, el JS del panel usa location.hostname:8099.
         inj = f"<script>window.__QR_WEB_PUBLIC_URL__ = {json.dumps(QR_WEB_PUBLIC_URL)};</script>"
         panel_html = panel_html.replace("<!-- QR_WEB_PUBLIC_URL_INJECT -->", inj, 1)
-        dbg = (
-            "<p class=\"text-secondary small mb-2\">Todo desde esta URL: con tu <strong>AGENT_SECRET</strong> usá el botón "
-            "<strong>Ver diagnóstico</strong> (abajo) para ver actividad reciente sin entrar al servidor. "
-            "Opcional en disco: <code class=\"mono\">"
-            + html.escape(str(LOG_FILE))
-            + "</code> si <code>WHATSAPP_DEBUG_LOG=1</code>.</p>"
-        )
-        panel_html = panel_html.replace("<!-- WHATSAPP_DEBUG_LOG_INJECT -->", dbg, 1)
+        panel_html = panel_html.replace("<!-- WHATSAPP_DEBUG_LOG_INJECT -->", "", 1)
         return HTMLResponse(panel_html)
     # fallback
     return HTMLResponse("<h3>Panel admin no disponible (archivo html no encontrado).</h3>", status_code=404)
